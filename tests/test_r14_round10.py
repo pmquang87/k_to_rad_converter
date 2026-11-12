@@ -3238,6 +3238,98 @@ class ClisPfacNodalFirstStep(unittest.TestCase):
                               if ln.startswith("/INTER/TYPE18/")]), 1)
 
 
+#: Statements the fix round made false (shipped texts; CHANGELOG may quote
+#: them): the unsourced NIP-1 shear claim (F2), the census arm's figure (F4),
+#: the 0-carrier record of LS-DYNA's conditional TSSFAC (F1), the bare 0.9
+#: words (F5), the S-kirch / B2 wordings (F6).
+_RETRACTED_ROUND_10_FIX = (
+    "because LS-DYNA does not shear these sections",
+    "LS-DYNA does not shear transversely at all",
+    "(LS-DYNA does not shear them)",
+    "-81.76 mm",
+    "hard-code 0.9; 0 F: roster movers",
+    "TSSFAC blank -> 0.9; ",
+    "a spot-weld beam adds no segment)",
+    "as the Mindlin /PROP/SHELL Ishell 12 / 24, on which",
+)
+
+
+class Round10FixRoundRecord(unittest.TestCase):
+    """The fix round's docs: no campaign figure left EXPECTED (the report's
+    section 0.36 measured them), the half-A reach as measured, the entry
+    order, the corrected ROADMAP entries, and the retracted spellings gone
+    from every shipped text."""
+
+    def _roadmap(self) -> str:
+        with open(os.path.join(_ROOT, "ROADMAP.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_no_campaign_figure_is_left_expected(self):
+        text = _changelog()
+        a = text.index("### Added")
+        b = text.index("**CardStack FEM-pipeline smoothing (2026-10).**")
+        for name, body in (("README.md", _readme()),
+                           ("ROADMAP.md", self._roadmap()),
+                           ("CHANGELOG.md round 10", text[a:b])):
+            with self.subTest(file=name):
+                self.assertNotIn("EXPECTED", body)
+
+    def test_the_half_a_reach_is_the_measured_one(self):
+        text = _t7._collapse(self._roadmap())
+        self.assertIn("half A moves 238 keys / 205 models by bytes or warning "
+                      "record (169 / 147 by bytes; MEASURED from `F:` in "
+                      "report §0.36 - the synthesis expected 234 / 203", text)
+        self.assertNotIn("moves 234 keys / 203 models", text)
+
+    def test_the_fix_round_entry_is_the_newest(self):
+        text = _changelog()
+        fix = text.index("R14 CAMPAIGN PARITY batch, round 10 - the fix round"
+                         " (")
+        self.assertLess(fix, text.index("R14 CAMPAIGN PARITY batch, round 10 "
+                                        "- part B ("))
+        self.assertLess(text.index("### Added"), fix)
+
+    def test_the_corrected_not_entries(self):
+        lines = self._roadmap().splitlines()
+        s = next(k for k, ln in enumerate(lines) if ln.startswith(
+            "**What round 10 deliberately does NOT close**"))
+        e = next(k for k, ln in enumerate(lines) if ln.startswith(
+            "**52 of the 59 starter failures.**"))
+        starts = [k for k in range(s, e)
+                  if re.match(r"^\d+\. \*\*", lines[k])]
+        block = {int(re.match(r"^(\d+)\.", lines[a]).group(1)):
+                 _t7._collapse("\n".join(lines[a:b]))
+                 for a, b in zip(starts, starts[1:] + [e])}
+        for needle in ("10 keys / 8 models", "9 explicit keys / 7 models",
+                       "0.3330", "contrl.F:1148-1149", "Remark 1",
+                       "1.35x - 2.7x", "13 / 13 decks, 6 / 6 with a blank "
+                       "TSSFAC"):
+            with self.subTest(entry=6, needle=needle):
+                self.assertIn(needle, block[6])
+        for needle in ("+74.5 %", "-43.4 %".replace("-", "−"),
+                       "a nodal first-step estimate", "coincidence"):
+            with self.subTest(entry=2, needle=needle):
+                self.assertIn(needle, block[2])
+        for needle in ("5.99e-8", "2.2e-10", "0 / 0 on the roster"):
+            with self.subTest(entry=7, needle=needle):
+                self.assertIn(needle, block[7])
+
+    def test_no_shipped_text_carries_a_retracted_fix_round_spelling(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_10_FIX:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_fix_round_spelling(self):
+        for needle in _RETRACTED_ROUND_10_FIX:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+
 class A10PackagePlateResidual(unittest.TestCase):
     """Fix round (findings 6.26 (4); the physics validator's F3): the
     package sentence names the plate's energy split against LS-DYNA's

@@ -484,9 +484,10 @@ as underscores.
   2 x k_LS with k_LS = SLSFAC x min(SFM x k_tool, SFS x k_blank), k = the
   median LS-DYNA Theory R16 eq. 30.8 segment stiffness K A / max shell
   diagonal (K = E / (3 (1 - 2 nu))) over the side's shells - the 2 undoes
-  the 1/2 an Istf-4 TYPE7 applies per node (`i7for3.F:976`), so the
-  engine's MAX(Stmin, MIN(Km, Ks, Stmax)) (`i7cor3.F:277-288`) gives each
-  blank node k_LS - and Stmin = min(1000, Stmax). The manual's formula, not
+  the 1/2 an Istf-4 TYPE7 applies per node (`i7for3.F:976`), so where
+  Stmax binds (the starter's own K above it) the engine's MAX(Stmin, MIN(Km,
+  Ks, Stmax)) (`i7cor3.F:277-288`) gives each blank node k_LS - and Stmin =
+  min(1000, Stmax). The manual's formula, not
   a penalty LS-DYNA's own runs show (its measured holder penalty on the
   anisotropic cup-draw is ~100x below it). Card 3 SFM is read for it since
   round 10. Refused by name inside the class: a rigid SURFA (the
@@ -499,13 +500,32 @@ as underscores.
   RMS 448.66 -> 41.68 % of LS's peak - its first two IE fifths are worse
   (-13.33 / -82.43 -> -96.70 / -99.15 %) and its ERROR column hits the
   -99.9 % print clamp on 569 of 2511 rows (the column leaves out the contact
-  energy); the anisotropic cup-draw IE RMS 5.57 -> 3.43 % (n 150) at a KE
+  energy) - see below; the anisotropic cup-draw IE RMS 5.57 -> 3.43 % (n 150) at a KE
   cost, END -42.14 -> -49.31 %, KE RMS 29.17 -> 28.83 %, holder force RMS
   129.70 -> 92.39 %; hemi.draw IE RMS 1.25 -> 0.99 %, KE RMS 39.60 ->
   36.19 % (n 120); control_adaptive.cup-draw IE RMS 12.86 -> 13.02 % (n 699),
   contact-1 force RMS 12.92 -> 13.66 %. The coupon `tests/fixtures/round10/r10_type7_coupon_quad.k` puts eq.
   30.8's node spring into the engine exactly (peak penetration 0.18031 mm =
   the closed form). `--no-rigid-tool-penalty-cap` writes Stmax 0.
+  **pan.drawbead.31 under the skill launcher's strict audit** (the default
+  of `run_or.ps1` since 2026-11-01): it is the one roster row that newly
+  trips it on the round-10 bytes - FLAG energy-error-clamped on 569 of 2511
+  rows, first at cycle 490, t 0.001637 - so its run ends exit 5 where the
+  `ed52c93` bytes ended 0. The flag is mostly bookkeeping: the engine's
+  ERROR column leaves out the interface energy (the `ed52c93` column ends at
+  -87.1 % without reaching the clamp). With the T01 CONTACT_ENERGY added,
+  (IE + KE + CE + HG) / EXTERNAL_WORK reads 0.0406 / 0.9277 / 0.9184 at 1/5,
+  3/5 and END on `ed52c93` and 0.0073 / 0.9166 / 0.7818 here: 21.8 % of the
+  external work is unaccounted at END against 8.2 %, while the absolute
+  residual falls 2.546e6 -> 1.720e6. Against the `ed52c93` bytes (A1 + A8 on
+  this deck, n 61, nt 4) every LS-DYNA channel improves: IE RMS 10.94 ->
+  4.01 %, KE RMS 14.28 -> 10.86 %, the punch / die force RMS 473.84 -> 46.72
+  % and 440.84 -> 44.16 % of the LS peaks. Two ways out: the launcher's
+  `-Advisory` runs the deck and keeps that gain; `--no-rigid-tool-penalty-cap`
+  writes the earlier bytes (no flag) and gives the gain up. Measured over the
+  roster after the round-10 re-runs: the strict default would refuse 43 of
+  the 302 normal rows (42 of 300 before); pan.drawbead.31 is the only newly
+  flagged row, and stagnation_A / _B are cleared.
 - `--initial-void-copy` / `--no-initial-void-copy` — **ON by default**. An
   `*INITIAL_VOID_PART` / `_SET` part in the fluid (master) set of a
   `*CONSTRAINED_LAGRANGE_IN_SOLID` coupling, on a deck with no
@@ -575,6 +595,32 @@ as underscores.
   under `--soften-stfac 0.3` (nt 4): STIFFNESS FACTOR 1.000 -> 0.300, the
   re-contact penetration 0.000914 -> 0.002344 mm, 685 -> 515 cycles. R14: 0
   decks move.
+
+Changed texts of the round-10 fix round (warnings and help only; no emitted
+byte moves):
+
+- **LS-DYNA's conditional default TSSFAC is named.** LS-DYNA's blank TSSFAC
+  is 0.333 with a contact and `*CONTROL_CONTACT` SLSFAC >= 9, 0.667 with
+  SLSFAC >= 1 or with `*INITIAL_DETONATION` / `*BOUNDARY_NON_REFLECTING`,
+  else 0.90 (Vol I R17 p.12-588 / 12-589 Remark 1); OpenRadioss without a
+  `/DT` card steps at its own 0.9 (`contrl.F:1148-1149`). Where TSSFAC is
+  blank, DT2MS >= 0 and the run is explicit, one sentence owned by the
+  keyword of the class names the factor LS-DYNA uses and the ratio (2.70x on
+  SLSFAC >= 9, 1.35x on the 0.667 classes); the `*CONTROL_CONTACT` SLSFAC
+  sentence points at it, and the DT2MS < 0 sentence names the deck's own
+  default beside the 0.9 it writes. The factor is not written (that would
+  move the step and the cycle count by the same ratio; no run measures it).
+  R14: 9 explicit keys / 7 models print it (underwater_A .. _F,
+  contact.projectile, projectile, proj-errod).
+- The A1 exclusion sentence and `--shrf-ashear` help state the NIP-1
+  sources (the starter zeroes Ashear on N 1, the engine integrates no
+  transverse shear at one point; a NIP-1 section kept at N 2 runs at 5/6)
+  and A1's named losses; the A2 sentence quotes the shipped default bytes'
+  cantilever (-81.9 .. -82.7 mm); A8's cell sentence says where Stmax binds;
+  the Kirchhoff-element sentence names Ish3n 0 on triangles; B2's route
+  sentence includes a solid spot-weld part; the 2a sentence of a CLIS set
+  with an A7 light fluid names the nodal first step; the package sentence
+  names the bird_B plate's energy split.
 
 ### Python API
 
@@ -8397,8 +8443,12 @@ part-A-i bytes and the package in one window): 2935 → 2976 cycles, END IE
 0.1 x 5.573e-11 / dt0^2 (the bird's median nodal mass; this converter's dt0
 2.046e-7, +0.11 % above the engine's first step 2.044e-7); a 0.2 % change of
 it (133.10 → 133.39, the round-10 research arms on the ed52c93 bytes) moved
-END IE by 0.37 point. `--no-ale-flow-tracking` restores the part-A-i bytes
-(2935 cycles, END IE +1484.66 %).
+END IE by 0.37 point. A residual, measured with a `/TH/PART` added to
+copies of both decks that reproduce the global history to every printed
+digit: the plate (part 3) against LS-DYNA's matsum at t 5.9992e-4 holds IE
+0.809 against 0.4637 (+74.5 %) and KE 2.629 against 4.6433 (−43.4 %);
+without the package the bird never loads it (0 / 0). `--no-ale-flow-tracking`
+restores the part-A-i bytes (2935 cycles, END IE +1484.66 %).
 
 ### `--clis-pfac-stiffness` — the CLIS coupling stiffness from PFAC
 
@@ -8435,7 +8485,12 @@ with the void copy at 11.28: 1109 → 1364 cycles, KE RMS 10.42 → 8.71 %, IE
 RMS 161.11 → 492.61 % (n 500 / 499). The estimate against the engine's
 first step: +0.11 % (bird_B), +1.77 % (quadrature_B), +22.6 % on
 stagnation_A's round-10 bytes (1.776e-6; +0.09 % against the 2.176e-6 of
-its part-A-i bytes, before A7's light fluid). Not a default.
+its part-A-i bytes, before A7's light fluid). The first step of stagnation_A
+is NODAL on both byte sets (NODE 1489 / NODE 1029), which this element-based
+estimate does not model - its +0.09 % was a coincidence; on a deck whose CLIS
+set holds an A7 light fluid the written Stfval is therefore 0.665 x the
+rule's value (the shipped stagnation_A arm ran with it), and the 2a sentence
+says so. Not a default.
 
 ### `--implicit-rayleigh-damping` — `/IMPL/DYNA/DAMP` from `*DAMPING_GLOBAL` on a dynamic implicit deck
 

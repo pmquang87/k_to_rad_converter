@@ -1020,8 +1020,8 @@ report's own (§0.7), with what the R14 TRIAGE ROUND 1 batch closes.
 | # | class | decks | closed by round 1 | round 2 | round 3 | round 4 | round 5 | round 6 | round 7 | round 8 | round 9 | round 10 |
 |--:|---|--:|---|---|---|---|---|---|---|---|---|---|
 | 1 | `/PART` → `/MAT` id never emitted (starter ERROR 179) | 29 | **22** — the thermal-only stand-in, `*MAT_004`, `*MAT_CWM`, `*MAT_010`, `*MAT_014`; 7 are deliberate refusals BY NAME (`*MAT_102`, `*MAT_090` ×2, `*MAT_031`, `*MAT_148`, `*MAT_002` ANIS) and 2 are the named `*MAT_THERMAL_CWM` weld seam | — | — | — | — | A6: `11.1.sbrake`'s zero-coupling `*MAT_ANISOTROPIC_ELASTIC` → `/MAT/LAW93` (starter 3 ERROR → 0; engine NORMAL under the modal recipe — a STATUS-ONLY promotion: its one linear step's IE scatters with the thread count and even at a fixed `nt`, so it measures neither the material nor the element; report §0.25.2); the two `*MAT_THERMAL_CWM` seams stay refused, now with the measured zero-heating fact | — (B3 leaves `11.1.sbrake`'s Isolid-14 `/PROP/TYPE6` byte-identical; the two `*MAT_THERMAL_CWM` seams stay refused) | unchanged by default; the CWM package (B11, the opt-in `--weld-trajectory-impflux`) is specified, not built (round-8 NOT list entry 6) | **B1: the two `*MAT_THERMAL_CWM` weld seams convert by default** (`05_4_1` / `05_5_1`: `*BOUNDARY_THERMAL_WELD_TRAJECTORY` → windowed `/IMPFLUX` VOLUMIC on the screened class, the CWM a TD_LC `/HEAT/MAT`; starter ERROR 179 → 0; `05_5_1` NORMAL in 66 323 cycles, the deposit −0.30 % of LS-DYNA's source energy, ONE physics model); A7: `9.3`'s refused `*MAT_ACOUSTIC` part → `/MAT/VOID` on the modal recipe only (starter 179 + 760 → 0, NORMAL, a status) | — (the two suspension giants' ERROR 179 is `*MAT_SPOTWELD_DAIMLERCHRYSLER`, unrouted: round-10 NOT entry 19) |
-| 2 | IE collapse — NORMAL run, `or_ie_final ≈ 0` against a real LS reference | 36 | no — a physics item of its own | **the SUPPORT half.** `*NODE` TC/RC (part A) sits under 44 of the class's rows and the `*SET_*` range spellings (part B) under 25 more. Measured: `taylor1` 0.000 → IE 42 590 (+2.4 % vs 41 588.6), `plate.typ13` 0.0 → a contact carrying 4151 of elastic contact energy. **Re-census AFTER the campaign re-run, not before** | **the LOAD PATH and the ELEMENT halves.** Item A registers 16 `*CONTACT` spellings that sit under 18 of the 30 STRICT IE-collapse rows; item B gives 46 more decks the hourglass control LS-DYNA defaults to; item C re-points the 7 rigid-body velocity carriers. **Re-census after the campaign re-run** — and state WHICH criterion: `analyze_pass1.py e` STRICT (`\|or_ie\| <= 1e-15 < \|ls_ie\|`, status normal) is **30 of 266** at `b3807bd`, `ie_dev_pct <= -99` on normals is **46**, over all statuses **68**, and the report's §0.15 headline "45" is a MOVERS carry-forward, not a census | **the CONSTRAINT and the RIGID-BODY halves.** B1 makes a `*DEFORMABLE_TO_RIGID` part rigid at t = 0 (4 keys / 2 models; `pend.imp`'s ENGINE energy-error column 99.9 % → −0.0 %, KE −0.017 % against the reference — its `ie_dev` row stays a `deviation` at +17.19 %, both energies being structural zeros), B2 restores the load path on every explicit all-rigid-SSID contact (4 keys / 5 interfaces swapped — `forging_A` ×2, `sphere1`, `blow-mold`, `EXP_SC_CONTACT_INTERFERENCE` — **plus 3 keys / 3 interfaces KEPT on 2 emitted models** (`mat_spring.belted-dummy`, `pend.imp`, `pendulum-ii/pendulum`), of which the two pendulums are created by B1 in this same round; the tables first said "1 key kept", which is master's PRE-round drop class and not the shipped reach. The KEEP is load-bearing on the round's own headline deck: with `--no-rigid-secondary-swap`, `pend.imp` emits 0 `/INTER` where master emits 1, so B1 shipped without B2's KEEP would DELETE that interface), and part A's items close three strict zero models (`ex_17`, `ex_18`, `thermal-stress`). Strict zero models 9 → 5 with `bumper`, 2 icfd and 2 ALE named. **Re-census after the campaign re-run** | **nothing by default, and that is the honest answer.** A2/A3 give the two `*CONSTRAINED_*` welds their load path back (`constrained.shell_solid.dome` IE −99.90 % → +36.08 %, `constrained.butt-weld` −100.00 % → +4.70 %) — but both rows stay `deviation` under the 10/10/5 bands, so the class COUNT does not move. `bumper` stays a zero model by default: `--implicit-rigid-secondary-swap` restores its load path (IE 0 → 6.934e5, −94.4 %) and its verdict still cannot move, because its LS-DYNA KE is exactly 0 and the benchmark short-circuits on a structural zero. `cylinder_impact_B`'s zero model is ATTRIBUTED (the missing ALE fill, cycle-0 KE 0 → 1.896e8 against 1.8846e8 with the fill by hand), not fixed | no DEFAULT change reaches a match. A1 turns three void timeouts NORMAL (`quadrature_B/C`, `bird_B`) as deviations; B5 gives the constrained `ex_27` twin its plane but the engine defect acts first; A4 names `*CONSTRAINED_TIED_NODES_FAILURE`; `ie_shell` becomes a NEW near-zero NORMAL model (−99.87 %, B1 status only) | **the FLUID and JOINT halves, by measurement.** B1's MU → Nu cell closes the channel family's near-collapse as PHYSICS: `channel_B` IE −98.89 → −0.09 % (81506 against 82566 cycles, re-measured on the implementation at nt 4), `channel_C` +0.01 %, `channel_A` −4.03 % (the pre-research arms) — deviation → match ×3; B2 gives `EXP_SC_JOINT_SCREW` its load path (nut 0 → 185.70 mm against LS-DYNA's 183.59, IE −100 → +42.76 %; it stays a deviation); A2 `revo-stiff` deviation → match. **Re-census the strict count after the campaign re-run** (6 before) | A1 (CMO −1 in the CON1 frame): `billet-forge` IE −99.97 → +0.13 % (deviation stays on its KE); A2: `mainboltaexpl`'s bolt no longer collapses; history movers, 0 verdict movers (MEASURED, campaign report §0.31) | no default change reaches the class's strict rows: B3 makes `main_fsi` a NORMAL run of a fixed rigid body under a skipped ICFD fluid (a status, near-zero by construction); the opt-ins act on the ALE void decks - B4's re-tune (bird-el plate IE −100 → −29.06 %) and B8's `--ale-flow-tracking` (bird_B END IE +1484.66 → +17.00 %, but KE RMS 253.09 → 749.89 %: MIXED); 0 verdict movers MEASURED (report §0.33: the strict IE-collapse count stays 5) | no round-10 item targets the class; A1 (Ashear from SHRF) moves 148 keys / 132 models by bytes with 0 verdict flips on the 14 match rows and on the 40 deviation / not_comparable keys the census ran; A10's ALE package takes `bird_B` END IE +1484.66 → +8.15 % (KE END −14.44 %: it stays a deviation) (the strict IE-collapse count EXPECTED unchanged; report §0.36 re-counts it) |
-| 3 | implicit engine will not advance (`TIMESTEP LIMIT` / `LOADING DATA` / indefinite stiffness) | 37 | no — the `/IMPL` recipe item; expect the 8 class-3 decks to reach it now that they START | partly: 27 of the class carry `*NODE` TC/RC and 5 more (`ex_06`, `ex_08` ×3, `ex_09`, `ex_10`) a `*BOUNDARY_SPC_SET` on a `_GENERATE` set. `ex_03` went from a TIMESTEP-LIMIT death at t = 0.22 to NORMAL at t = 1.0. **The residue is the `/IMPL` recipe item and must be re-measured after BOTH parts, or the attribution is unreadable** | **partly, and the rest is censused rather than guessed.** Item F removes `/IMPL/DT/FIXPOINT` from the default output: measured, ten decks that died `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT` reach NORMAL TERMINATION (`ex_01` x3, `ex_14` x4, `ex_15` x3), and three currently-NORMAL controls do not regress. The residue is grouped by FAMILY, with its mechanism per family, in *The implicit residue after round 3* below | **partly.** A1 raises `/IMPL/QSTAT/DTSCAL` 0.1 → 10 on all 51 carriers (`4.2.frf.cant-1` 4 cycles + ERROR → 104 cycles at t = 1.000, IE −0.31 %), A2 adds the RIKS `/IMPL/DT/3` behind `--arclength-riks`, and the four `thermal/welding-new` rows are re-verdicted not-comparable BY CONSTRUCTION. `bumper` stays a NORMAL zero model by the IMPLICIT gate on B2, NAMED. The per-family residue table below is updated in place | unchanged by default. The one implicit lever is `--implicit-rigid-secondary-swap` (opt-in, 1 key). The constant-step hypothesis was MEASURED and is a NO-GO — see the round-5 list below | B1: `ie_shell` error_engine → normal (status only), `tensile2` ENDS +7.36 → −0.54 % but its IE history is not closer (+53 % at `t` 0.80; RMS 2.00 → 2.48 % of the peak); B2 names the constant step on 39 + 11 keys; B3 `--implicit-constant-step` opt-in cap; B4: the `ex_27` pair is an ENGINE defect (the free bar's momentum × −3.0000000), warned, no converter arm; `metal-cutting` LOST its NORMAL under B5 (report §0.25; no LS energy reference) | **A4: `ex_02` ×3 timeout → normal** (`/PROP/SOLID` Isolid 14, 28 cycles at nt 4 and 2; not_comparable stays — the LS KE is a structural zero); the residue 32 keys / 30 models → 29 / 29 (the rule: not `normal` among the 135 `/IMPL` emitters); A5 (iii) names IMFLAG < 0 (`ie_shell` stays status-only); `tire.k`'s `LOADING DATA` stop is named in the residue table below | B1 `tire.k` error_engine → normal (IMFLAG 0 + NEIG 0 is an LS-DYNA explicit run; 24329 cycles); B2 `metal-cutting` error_engine → normal (a status: the implicit solver reads `/FUNCT_SMOOTH` as a straight ramp, now a sampled sine `/FUNCT`); B6 `doorbeam` without the stub (MIXED: END +582.00 → +689.08 %, RMS 393.31 → 313.05 %); B3 `ie_shell` two engine files (h.2 opt-in; h.3 default only if the runner chain passed); the residue 29 / 29 → 27 / 27 (MEASURED, campaign report §0.31) | A4 + A5: `ex_16` error_starter → normal (1101 cycles; KE fifths 1-3 within +0.42 %); A7 `9.3` and B3 `main_fsi` become normal (statuses); A1 + A2: doorbeam's punch moves (DY 0 → the LS nodout at every fifth; IE END +582.00 → −0.78 .. −28.12 %, RMS 393.31 → 7.21 .. 15.26 %, 125 runs on three branches); the A11 / A12 opt-ins reach NORMAL on `ex_07` / `ex_06` without campaign rows; the residue 27 / 27 → 24 / 24 (MEASURED, report §0.33, the same rule) | A5: the end fix point lands the 9 keys / 5 models that ended NORMAL below ENDTIM on t_end (`reached_frac` 0.9195 .. 0.9689 → 1.000, fifths 1-4 unchanged, +1 cycle); A6 names the inert `/DAMP` of an implicit run (8 keys / 3 models, text; the card is the opt-in `--implicit-rayleigh-damping`); the residue 24 / 24 EXPECTED unchanged (report §0.36, the same rule) |
+| 2 | IE collapse — NORMAL run, `or_ie_final ≈ 0` against a real LS reference | 36 | no — a physics item of its own | **the SUPPORT half.** `*NODE` TC/RC (part A) sits under 44 of the class's rows and the `*SET_*` range spellings (part B) under 25 more. Measured: `taylor1` 0.000 → IE 42 590 (+2.4 % vs 41 588.6), `plate.typ13` 0.0 → a contact carrying 4151 of elastic contact energy. **Re-census AFTER the campaign re-run, not before** | **the LOAD PATH and the ELEMENT halves.** Item A registers 16 `*CONTACT` spellings that sit under 18 of the 30 STRICT IE-collapse rows; item B gives 46 more decks the hourglass control LS-DYNA defaults to; item C re-points the 7 rigid-body velocity carriers. **Re-census after the campaign re-run** — and state WHICH criterion: `analyze_pass1.py e` STRICT (`\|or_ie\| <= 1e-15 < \|ls_ie\|`, status normal) is **30 of 266** at `b3807bd`, `ie_dev_pct <= -99` on normals is **46**, over all statuses **68**, and the report's §0.15 headline "45" is a MOVERS carry-forward, not a census | **the CONSTRAINT and the RIGID-BODY halves.** B1 makes a `*DEFORMABLE_TO_RIGID` part rigid at t = 0 (4 keys / 2 models; `pend.imp`'s ENGINE energy-error column 99.9 % → −0.0 %, KE −0.017 % against the reference — its `ie_dev` row stays a `deviation` at +17.19 %, both energies being structural zeros), B2 restores the load path on every explicit all-rigid-SSID contact (4 keys / 5 interfaces swapped — `forging_A` ×2, `sphere1`, `blow-mold`, `EXP_SC_CONTACT_INTERFERENCE` — **plus 3 keys / 3 interfaces KEPT on 2 emitted models** (`mat_spring.belted-dummy`, `pend.imp`, `pendulum-ii/pendulum`), of which the two pendulums are created by B1 in this same round; the tables first said "1 key kept", which is master's PRE-round drop class and not the shipped reach. The KEEP is load-bearing on the round's own headline deck: with `--no-rigid-secondary-swap`, `pend.imp` emits 0 `/INTER` where master emits 1, so B1 shipped without B2's KEEP would DELETE that interface), and part A's items close three strict zero models (`ex_17`, `ex_18`, `thermal-stress`). Strict zero models 9 → 5 with `bumper`, 2 icfd and 2 ALE named. **Re-census after the campaign re-run** | **nothing by default, and that is the honest answer.** A2/A3 give the two `*CONSTRAINED_*` welds their load path back (`constrained.shell_solid.dome` IE −99.90 % → +36.08 %, `constrained.butt-weld` −100.00 % → +4.70 %) — but both rows stay `deviation` under the 10/10/5 bands, so the class COUNT does not move. `bumper` stays a zero model by default: `--implicit-rigid-secondary-swap` restores its load path (IE 0 → 6.934e5, −94.4 %) and its verdict still cannot move, because its LS-DYNA KE is exactly 0 and the benchmark short-circuits on a structural zero. `cylinder_impact_B`'s zero model is ATTRIBUTED (the missing ALE fill, cycle-0 KE 0 → 1.896e8 against 1.8846e8 with the fill by hand), not fixed | no DEFAULT change reaches a match. A1 turns three void timeouts NORMAL (`quadrature_B/C`, `bird_B`) as deviations; B5 gives the constrained `ex_27` twin its plane but the engine defect acts first; A4 names `*CONSTRAINED_TIED_NODES_FAILURE`; `ie_shell` becomes a NEW near-zero NORMAL model (−99.87 %, B1 status only) | **the FLUID and JOINT halves, by measurement.** B1's MU → Nu cell closes the channel family's near-collapse as PHYSICS: `channel_B` IE −98.89 → −0.09 % (81506 against 82566 cycles, re-measured on the implementation at nt 4), `channel_C` +0.01 %, `channel_A` −4.03 % (the pre-research arms) — deviation → match ×3; B2 gives `EXP_SC_JOINT_SCREW` its load path (nut 0 → 185.70 mm against LS-DYNA's 183.59, IE −100 → +42.76 %; it stays a deviation); A2 `revo-stiff` deviation → match. **Re-census the strict count after the campaign re-run** (6 before) | A1 (CMO −1 in the CON1 frame): `billet-forge` IE −99.97 → +0.13 % (deviation stays on its KE); A2: `mainboltaexpl`'s bolt no longer collapses; history movers, 0 verdict movers (MEASURED, campaign report §0.31) | no default change reaches the class's strict rows: B3 makes `main_fsi` a NORMAL run of a fixed rigid body under a skipped ICFD fluid (a status, near-zero by construction); the opt-ins act on the ALE void decks - B4's re-tune (bird-el plate IE −100 → −29.06 %) and B8's `--ale-flow-tracking` (bird_B END IE +1484.66 → +17.00 %, but KE RMS 253.09 → 749.89 %: MIXED); 0 verdict movers MEASURED (report §0.33: the strict IE-collapse count stays 5) | no round-10 item targets the class; A1 (Ashear from SHRF) moves 148 keys / 132 models by bytes with 0 verdict flips on the 14 match rows and on the 40 deviation / not_comparable keys the census ran; A10's ALE package takes `bird_B` END IE +1484.66 → +8.15 % (KE END −14.44 %: it stays a deviation) (the strict IE-collapse count 5 → 5, the same five rows, re-summed from `db.json` before and after report §0.36) |
+| 3 | implicit engine will not advance (`TIMESTEP LIMIT` / `LOADING DATA` / indefinite stiffness) | 37 | no — the `/IMPL` recipe item; expect the 8 class-3 decks to reach it now that they START | partly: 27 of the class carry `*NODE` TC/RC and 5 more (`ex_06`, `ex_08` ×3, `ex_09`, `ex_10`) a `*BOUNDARY_SPC_SET` on a `_GENERATE` set. `ex_03` went from a TIMESTEP-LIMIT death at t = 0.22 to NORMAL at t = 1.0. **The residue is the `/IMPL` recipe item and must be re-measured after BOTH parts, or the attribution is unreadable** | **partly, and the rest is censused rather than guessed.** Item F removes `/IMPL/DT/FIXPOINT` from the default output: measured, ten decks that died `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT` reach NORMAL TERMINATION (`ex_01` x3, `ex_14` x4, `ex_15` x3), and three currently-NORMAL controls do not regress. The residue is grouped by FAMILY, with its mechanism per family, in *The implicit residue after round 3* below | **partly.** A1 raises `/IMPL/QSTAT/DTSCAL` 0.1 → 10 on all 51 carriers (`4.2.frf.cant-1` 4 cycles + ERROR → 104 cycles at t = 1.000, IE −0.31 %), A2 adds the RIKS `/IMPL/DT/3` behind `--arclength-riks`, and the four `thermal/welding-new` rows are re-verdicted not-comparable BY CONSTRUCTION. `bumper` stays a NORMAL zero model by the IMPLICIT gate on B2, NAMED. The per-family residue table below is updated in place | unchanged by default. The one implicit lever is `--implicit-rigid-secondary-swap` (opt-in, 1 key). The constant-step hypothesis was MEASURED and is a NO-GO — see the round-5 list below | B1: `ie_shell` error_engine → normal (status only), `tensile2` ENDS +7.36 → −0.54 % but its IE history is not closer (+53 % at `t` 0.80; RMS 2.00 → 2.48 % of the peak); B2 names the constant step on 39 + 11 keys; B3 `--implicit-constant-step` opt-in cap; B4: the `ex_27` pair is an ENGINE defect (the free bar's momentum × −3.0000000), warned, no converter arm; `metal-cutting` LOST its NORMAL under B5 (report §0.25; no LS energy reference) | **A4: `ex_02` ×3 timeout → normal** (`/PROP/SOLID` Isolid 14, 28 cycles at nt 4 and 2; not_comparable stays — the LS KE is a structural zero); the residue 32 keys / 30 models → 29 / 29 (the rule: not `normal` among the 135 `/IMPL` emitters); A5 (iii) names IMFLAG < 0 (`ie_shell` stays status-only); `tire.k`'s `LOADING DATA` stop is named in the residue table below | B1 `tire.k` error_engine → normal (IMFLAG 0 + NEIG 0 is an LS-DYNA explicit run; 24329 cycles); B2 `metal-cutting` error_engine → normal (a status: the implicit solver reads `/FUNCT_SMOOTH` as a straight ramp, now a sampled sine `/FUNCT`); B6 `doorbeam` without the stub (MIXED: END +582.00 → +689.08 %, RMS 393.31 → 313.05 %); B3 `ie_shell` two engine files (h.2 opt-in; h.3 default only if the runner chain passed); the residue 29 / 29 → 27 / 27 (MEASURED, campaign report §0.31) | A4 + A5: `ex_16` error_starter → normal (1101 cycles; KE fifths 1-3 within +0.42 %); A7 `9.3` and B3 `main_fsi` become normal (statuses); A1 + A2: doorbeam's punch moves (DY 0 → the LS nodout at every fifth; IE END +582.00 → −0.78 .. −28.12 %, RMS 393.31 → 7.21 .. 15.26 %, 125 runs on three branches); the A11 / A12 opt-ins reach NORMAL on `ex_07` / `ex_06` without campaign rows; the residue 27 / 27 → 24 / 24 (MEASURED, report §0.33, the same rule) | A5: the end fix point lands the 9 keys / 5 models that ended NORMAL below ENDTIM on t_end (`reached_frac` 0.9195 .. 0.9689 → 1.000, fifths 1-4 unchanged, +1 cycle); A6 names the inert `/DAMP` of an implicit run (8 keys / 3 models, text; the card is the opt-in `--implicit-rayleigh-damping`); the residue 24 / 24 unchanged, MEASURED in report §0.36 (the same rule) |
 | 4 | `nvh` frequency-domain family (7 NORMAL at cycle ≤ 1, 6 stall at cycle 0) | 13 | no — the #110 class | the modal CHAIN is fixed for `6.2.PSD` (f1 110.5541 Hz on an exact matrix, +0.09 % vs its `eigout`), but that is `tools/`, not the `.rad` — the family's engine behaviour is unchanged | unchanged, and now separated from row 3 by measurement: the 6 cycle-0 stalls are SSD / ERP / PSD frequency-domain requests, not an `/IMPL` recipe problem — OpenRadioss has no frequency-domain solver at all | unchanged — still queue row 4, no frequency-domain solver | unchanged — still no frequency-domain solver | unchanged — no frequency-domain solver | unchanged — no frequency-domain solver | B5: the stated CP 0.0 of 8.7 / 9.1 / 9.2 / 9.4 written as Pmin −1e-20 (4 byte movers, 0 status moves) | unchanged — no frequency-domain solver (the K-export hang of the 6 nvh timeouts is the user's decision, round-9 NOT entry 17) | unchanged — no frequency-domain solver (the nvh K-export six stay the user's decision, round-10 NOT entry 31) |
 | 5 | `/MAT` density ≤ 0 (ERROR 683, 8) + beam property (ERROR 314/315, 8) | 16 | **14** — all 8 density decks and the 6 ELFORM-3 truss decks | — | — | — | — | — | — | — | A5: `ex_16`'s rigid ELFORM 7 beam takes its section from TS1 (ERRORs 314-317 + 274 cleared; the 5.68× gap to the LS rigid mass named) | — |
 | — | `/MAT/LAW51` (ERROR 99): 4 `Bunreacted`, 5 submaterial | 9 | **8** — `point_source.k` stays refused (`*MAT_GAS_MIXTURE`) | — | — | — | — | — | — | — | — | — (the LAW51 void route: round-10 NOT entry 17) |
@@ -3108,9 +3108,10 @@ models on the 356-key / 312-model roster.
     1254.6 N·mm from 2.4e-4 s. Next: the inflow `/IMPVEL` work against LS's
     bndout on both decks; a carrier that does not crash. 2 keys / 2 models.
     **Round 10:** both rows run NORMAL under A7 (832 → 9364 cycles; KE RMS
-    53.09 → 14.40 % / 60.18 → 10.03 %, IE RMS 206.79 % named; the status moves
-    EXPECTED, report §0.36); the inflow work's own lever (2a) is round-10 NOT
-    entry 2.
+    53.09 → 14.40 % / 60.18 → 10.03 %, IE RMS 206.79 % named; both status
+    moves MEASURED in report §0.36: error_engine → normal, the old bytes
+    failing at cycle 832 again in the same window); the inflow work's own
+    lever (2a) is round-10 NOT entry 2.
 14. **The 2-D route's second carrier** (record): scored on metal-forming only
     (IE END −0.45 %); `2Dlag` and the SPR main are starter-only giants. Next:
     `2Dlag`'s 2-D-route run (a giant: those bytes never ran - the row's stale
@@ -3153,8 +3154,8 @@ models on the 356-key / 312-model roster.
     `mmats.F:187-196`, a SOLVER limitation), 4.2 (a REFERENCE question: LS
     Error 60004 at t 0.33145), `ex_05` (no lever reaches NORMAL), the `ex_27`
     pair (an ENGINE DEFECT).
-    **Round 10:** 24 / 24 EXPECTED unchanged (round-10 NOT entry 21; report
-    §0.36 measures it).
+    **Round 10:** 24 / 24 unchanged, MEASURED in report §0.36 (round-10 NOT
+    entry 21).
 19. **An implicit auto-step stop below ENDTIM** (new; part A's record): 9 keys
     / 5 models (4.3, `ex_11`, the `ex_14` ×4 and `ex_15` ×3 families) end NORMAL
     with the next dynamic step larger than the remaining time
@@ -3251,8 +3252,10 @@ stages on one branch whose deck components are disjoint by measurement: A-i
 (shells and sections, the time step, implicit, the erosion and few-node
 texts), A-ii (ALE and the rigid-tool contacts) and B (the CardStack batch's
 contact and damping leftovers with 0 roster movers, and these docs); half A
-moves 234 keys / 203 models (169 / 147 by bytes) and half B 0 / 0, A ∩ B = 0
-keys. Every default change was measured with its history on fresh
+moves 238 keys / 205 models by bytes or warning record (169 / 147 by
+bytes; MEASURED from `F:` in report §0.36 - the synthesis expected 234 / 203,
+the 4 more keys are underwater_C .. _F, whose AMMG sentence A7 changed) and
+half B 0 / 0, A ∩ B = 0 keys. Every default change was measured with its history on fresh
 conversions at `ed52c93` by the census and its critics (nt 4; nt 2 where
 implicit) and again on its own stage's bytes, base-paired, fifths by the
 campaign rule (the LAST row of a printed time; an equidistant fifth takes the
@@ -3263,7 +3266,7 @@ the 14 match rows); A2 NIP 1 → N 1 on triangle-only sections (the belted
 dummy IE END +65.73 → +46.57 %, RMS 22.79 → 14.23 % with A1); A3 the texts
 that ride them; A4 TSSFAC x `|DT2MS|` on `/DT/NODA/CST` by default (the
 billet forge 12500 → 13889 cycles = LS, KE RMS 8.54 → 1.74 %: deviation →
-match EXPECTED); A5 the end fix point on dynamic implicit decks (9 keys / 5
+match, MEASURED in report §0.36); A5 the end fix point on dynamic implicit decks (9 keys / 5
 models reach t_end); A6 the inert implicit `/DAMP` named, its
 `/IMPL/DYNA/DAMP` card opt-in (`--implicit-rayleigh-damping`: on the shipped
 step it worsens ex_14's IE RMS 4.51 → 5.27 %); A11 ERODE 1 + TSLIMT no
@@ -3274,7 +3277,13 @@ light fluid + the ALE velocity inlet as a pair (stagnation_A / _B
 error_engine → NORMAL, 832 → 9364 cycles, KE RMS 53.09 → 14.40 %); A8 the
 rigid-tool penalty cap Stmax = 2 x LS-DYNA Theory eq. 30.8 x SLSFAC x SF on
 its measured class (pan.drawbead IE RMS 10.85 → 4.01 %; the anisotropic
-cup-draw's KE END −42.14 → −49.31 % named); A9 SLSFAC named; A10 the
+cup-draw's KE END −42.14 → −49.31 % named; on pan.drawbead the default trips
+the launcher's strict audit - FLAG energy-error-clamped on 569 of 2511 rows,
+the one roster row that newly does - where the energy balance with the
+contact energy added reads 0.918 → 0.782 at END, 21.8 % of the external work
+unaccounted against 8.2 % on `ed52c93`, an absolute residual that falls
+2.546e6 → 1.720e6; A8 stays the default, the README A8 bullet says how to run
+it under the strict audit); A9 SLSFAC named; A10 the
 `*INITIAL_VOID` + CLIS void copy by default (quadrature_B KE RMS 28.17 →
 10.42 %, IE RMS 142.04 → 161.11 % named) and the bird_B package by default
 (A10's gate PASSED: the package at the estimated Stfval 133.1 gave 2976
@@ -3290,13 +3299,15 @@ SHLEDG against SRNDE on SOFT 2; B8 the K-20 minors; B9 the `/PRELOAD` stable
 set's texts (clamped bars); B10 the K-04 bullet's measurement. Round 10's
 default bytes move 169 deck keys on 147 emitted models (part A-i 167 / 146,
 part A-ii 9 / 8, part B 0 / 0; the stages' two-tree sweeps, 7 keys moved by
-both A stages). The ledger EXPECTED from the synthesis (report §0.36
-replaces it by the MEASURED one in every document): normal 300 → 302,
-error_engine 23 → 21, match 34 → 35, deviation 144 → 145, not_comparable 188
-→ 186 (pending 7, skipped 25, timeout 11, error_starter 7 unchanged); the
-implicit residue 24 / 24 EXPECTED unchanged (the rule: not `normal` among the
-134 / 107 `/IMPL` emitters); STALE giant runs 5 (no giant launched: the 8
-half-A giant byte movers are converted and run to the starter only).
+both A stages). The ledger MEASURED by the campaign pass (report §0.36, the
+158 re-runs of `ab53752`; equal to the synthesis's expectation on every
+line): normal 300 → 302, error_engine 23 → 21, match 34 → 35, deviation 144
+→ 145, not_comparable 188 → 186 (pending 7, skipped 25, timeout 11,
+error_starter 7 unchanged); the implicit residue 24 / 24 unchanged, MEASURED
+(the rule: not `normal` among the 134 / 107 `/IMPL` emitters); STALE giant
+runs 5 (no giant launched: the 8 half-A giant byte movers are converted and
+run to the starter only). The fix round moves warning text only (report
+§0.36.1).
 
 **What round 10 deliberately does NOT close** — each entry with the
 measurement that decided it and the deck that would decide it next; reaches
@@ -3327,8 +3338,18 @@ as N keys / M models on the 356-key / 312-model roster.
    10.42 → 8.71 % for IE RMS 161.11 → 492.61 % (the opt-in
    `--clis-pfac-stiffness`); the estimate is +22.6 % above stagnation_A's
    first step on its round-10 bytes, where A7's light fluid moves the first
-   step to a node. Next: quadrature_C and bird_B's plate at the rule values.
-   2a PFAC >= 0 6 keys / 5 models; PFAC < 0 refused 2 / 2.
+   step to a node, and its +0.09 % on the part-A-i bytes is a coincidence -
+   the first step is nodal on both byte sets (NODE 1489 / NODE 1029), which
+   the element-based estimate does not model; since the fix round the 2a
+   sentence of a CLIS set with an A7 light fluid says so (the written Stfval
+   is 0.665 x the rule's there; the shipped opt-in arm ran with it). The
+   package's residual, measured by the physics validator with a `/TH/PART`
+   added to copies that reproduce the global history to every printed digit:
+   the plate (part 3) against LS-DYNA's matsum at t 5.9992e-4 holds IE 0.809
+   against 0.4637 (+74.5 %) and KE 2.629 against 4.6433 (−43.4 %); without
+   the package the bird never loads it (0 / 0). Next: a nodal first-step
+   estimate (the node's mass over its connected stiffness); quadrature_C at
+   the rule value. 2a PFAC >= 0 6 keys / 5 models; PFAC < 0 refused 2 / 2.
 3. **NIP 1 on quads and the membrane ELFORM 5 / 9 → N 1** (new): QBAT N 1
    dies (USER BREAK) at cycles 81-88 at the default step and runs at half the
    step (5315 cycles); QEPH N 1 on the elastic airbag runs away at full and
@@ -3345,20 +3366,44 @@ as N keys / M models on the 356-key / 312-model roster.
 5. **ELFORM -16 / 20 / 21 / 26 in `_ELFORM_ALWAYS_QEPH`** (record): 0
    explicit carriers on six rosters; ELFORM 9 keeps 24 (12 worsens IE RMS on
    all 3 explicit carriers). Next: an explicit carrier.
-6. **K-41 on `/DT/AMS` and LS's conditional TSSFAC default** (new): no AMS
-   arm exists, so A4 keeps abs(DT2MS) there; LS's blank TSSFAC is 0.333 /
-   0.667 with SLSFAC >= 1, 0.667 with `*INITIAL_DETONATION` /
-   `*BOUNDARY_NON_REFLECTING`, else 0.90 (Vol I R17 `*CONTROL_TIMESTEP`
-   Remark 1), k2rad and dyna2rad hard-code 0.9; 0 F: roster movers. Next: one
-   `--ams` arm on the billet forge; a blank-TSSFAC carrier with SLSFAC >= 1
-   or a detonation card. DT2MS < 0 13 / 13; the conditional class 0 / 0.
+6. **K-41 on `/DT/AMS` and LS's conditional TSSFAC default** (new;
+   corrected by the fix round): no AMS arm exists, so A4 keeps abs(DT2MS)
+   there. LS's blank TSSFAC is 0.333 with a contact and `*CONTROL_CONTACT`
+   SLSFAC >= 9, 0.667 with SLSFAC >= 1, 0.667 with `*INITIAL_DETONATION` /
+   `*BOUNDARY_NON_REFLECTING`, else 0.90 (Vol I R17 p.12-588 / 12-589
+   Remark 1); k2rad and dyna2rad write 0.9 for a blank (`convertcards.cxx:166`),
+   and where k2rad writes no `/DT` at all OpenRadioss steps at its own 0.9
+   (`contrl.F:1148-1149`). MEASURED (the fix round's scanner: raw keyword text
+   with `*INCLUDE`, against each deck's d3hsp `time step scale factor`; the
+   echo equals the rule on all 353 R14 decks that print one): the class
+   carries 10 keys / 8 models - underwater_A .. _F (`*INITIAL_DETONATION`,
+   0.6670), contact.projectile and projectile (SLSFAC 1, 0.6670), proj-errod
+   (SLSFAC 10, 0.3330: OpenRadioss steps at 2.7x LS-DYNA's factor) and
+   efg/metal-cutting (SLSFAC 2.5, 0.6670; implicit, so no step to scale) -
+   none with a `*CONTROL_TIMESTEP` card, so k2rad writes no `/DT` and each
+   explicit carrier (9 keys / 7 models) runs at 0.9; since the fix round each
+   gets one sentence, owned by its keyword (text only). The '0 / 0' of the
+   first record holds for the DT2MS < 0 class only: 13 / 13 decks, 6 / 6 with
+   a blank TSSFAC, none of them a carrier. Next: writing the deck's own factor
+   as the `/DT` Tsca - it moves the 9 explicit keys / 7 models by bytes and
+   their step and cycle count by 1.35x - 2.7x, and no run measures it yet (a
+   round-11 candidate); one `--ams` arm on the billet forge.
 7. **The LS-faithful erosion card** (the rest of A11, recorded here rather
    than as an entry of its own): k2rad's corrected rule writes no
    `/DT/*/DEL`; the LS-faithful card (tsmin = DTMIN x dtstart by ERODE
    digit: BRICK + SPHCEL / SHELL + SH_3N / BEAM) erodes coupon B v2 at ~3.0e-4
    s (2.996e-4) where k2rad deletes 0; no corpus carrier with an LS erosion
    count. Next: a deck with a d3hsp erosion count > 0. ERODE != 0 2 / 2
-   (birdball, 2Dlag), DTMIN > 0 4 / 4.
+   (birdball, 2Dlag), DTMIN > 0 4 / 4. Recorded with it (the physics
+   validator's coupons, ERODE 1, TSLIMT 1e-7, DTMIN 0): TSLIMT's shell-modulus
+   floor of `*MAT` 3 / 18 / 19 / 24 (Vol I R17 p.12-584 / 12-585) has no
+   OpenRadioss counterpart and is named, not modelled - the branch deletes
+   nothing, as LS-DYNA does with DTMIN 0, and its shell step falls to 5.99e-8
+   s and its triangle step to 2.2e-10 s where LS-DYNA holds the shell at
+   TSLIMT. Carriers (the fix round's scanner, TSLIMT != 0 with a shell part on
+   `*MAT` 3 / 18 / 19 / 24, by DT2MS active or not): 0 / 0 on the roster -
+   no R14 deck states TSLIMT != 0 (k2rad's own records agree: 0 TSLIMT
+   records over the 356 keys).
 8. **The rigid-tool penalty cap beyond its measured class** (new):
    AUTOMATIC_ONE_WAY (Ryan_Lee W13: Radioss-vs-Radioss only, IE within 2 %,
    ground impulse −34 % at fifth 1), solid sides (eq. 30.7: no carrier, no
@@ -3448,8 +3493,8 @@ as N keys / M models on the 356-key / 312-model roster.
     WARNING 100217 at '/GRSHEL/SHEL/90005' on the default bytes (both arms),
     the strict audit's reader-card-missing. Next: the emitted `/INTER/TYPE11`
     block read against its CFG. 1 / 1.
-21. **The implicit residue after round 10** (record): 24 / 24 EXPECTED
-    unchanged (report §0.36 measures it) = TIMESTEP LIMIT 11 (4.2, the roof
+21. **The implicit residue after round 10** (record): 24 / 24 unchanged,
+    MEASURED in report §0.36 = TIMESTEP LIMIT 11 (4.2, the roof
     crush, ex_05 / 06 / 07, the ex_27 pair, the 4 welding steps by
     construction), timeout 8 (4.1, the door sag, the 6 nvh rows), refused IGA
     3, pending giants 2; A5 brings the 9 / 5 NORMAL-below-ENDTIM rows to 1.000
@@ -3542,6 +3587,17 @@ as N keys / M models on the 356-key / 312-model roster.
     it. Next: a floor on the remainder (fold a sliver into the step before),
     measured on metal-cutting. 1 / 1 (metal-cutting, no LS energy
     reference).
+
+**Found on the way by the round-10 validators, older than round 10 (round-11
+candidates, no change in round 10):** (a) an explicit QEPH quad strip
+(`/PROP/SHELL` Ishell 24) is 0.6 % stiffer than both Timoshenko closed forms
+on both byte sets (L/t 3: −0.612 / −0.618 %; L/t 5: −0.660 / −0.663 %) - an
+element record, where the implicit strips sit on their closed forms to
+−0.007 %; (b) `*CONTROL_IMPLICIT_SOLUTION` NSOLVR 1 (LS-DYNA's linear solver)
+is written as `/IMPL/NONLIN/1` with an energy tolerance, and on a
+one-increment large load the engine accepted a state at |r| / |r0| 7.8e-2
+with a deflection 7.7 % off, on both byte sets. Next: the QEPH strip at a
+finer mesh; an `/IMPL/LINEAR` route for NSOLVR 1, measured on that coupon.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
@@ -4344,10 +4400,11 @@ TIMESTEP LIMIT 11 (4.2, the roof crush, `ex_05` / `06` / `07`, the `ex_27`
 pair, the 4 welding steps by construction), timeout 8 (4.1, the door sag, the
 6 nvh rows), refused IGA 3, pending giants 2; 18 only if the user also
 switches the nvh rows' engine (round-9 NOT entry 17).
-**Round 10** (EXPECTED; the campaign re-run of report §0.36 replaces it): no
-residue row is expected to move - A5 lands the 9 keys / 5 models that ended
-NORMAL below ENDTIM on t_end (they were `normal` already) and A7's two status
-movers are explicit decks - so the residue stays **24 keys / 24 models** by
+**Round 10** (MEASURED by the campaign re-run, report §0.36 at `ab53752`,
+equal to the pre-run expectation): no residue row moved - A5 lands the 9 keys
+/ 5 models that ended NORMAL below ENDTIM on t_end (they were `normal`
+already) and A7's two status movers are explicit decks - so the residue stays
+**24 keys / 24 models** by
 the same rule (`/IMPL` emitters 134 / 107 unchanged): TIMESTEP LIMIT 11,
 timeout 8, refused IGA 3, pending giants 2.
 
@@ -4576,7 +4633,8 @@ recipe's section 17 lists all nine). The four that concern k2rad:
   rivet), compared on the step and the added mass.
   **Round 10:** CLOSED by A4: the default on `/DT/NODA/CST`
   (`--no-dt2ms-tssfac-product`; the billet forge 12500 -> 13889 cycles = LS, KE
-  RMS 8.54 -> 1.74 %: deviation -> match EXPECTED); `/DT/AMS` keeps `|DT2MS|`
+  RMS 8.54 -> 1.74 %: deviation -> match, MEASURED in report §0.36); `/DT/AMS`
+  keeps `|DT2MS|`
   (round-10 NOT entry 6).
 - **ERODE 1 + TSLIMT > 0 -> `/DT/<elem>/DEL` Tmin = TSLIMT** (to check). Vol I
   R17 p.12-586 erodes solids and thick shells at tsmin under ERODE 1, and
