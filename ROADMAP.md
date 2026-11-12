@@ -3681,9 +3681,9 @@ strings (the closing round, 6.35 (3)(f)): the A7 1b refusal warning
 `writer/loads._pm_inlet_decision` and the `ale_inflow_ebcs` comment in
 `state.py` say that an `/IMPVEL` on an Eulerian ALE face admits no material -
 true of OpenRadioss - without the clause that LS-DYNA's own face admits the
-inflow (the mass balance of (a)); a text item (the refusal warning is the
-warning record of a refused row; 0 R14 keys print it - none of the 356 roster
-conversion logs). `docs/K_ROUTE_FOR_RADIOSS_CARDS.md` carries the clause since
+inflow (the mass balance of (a)); a text item (changing the refusal warning
+moves the warning record of a refused row; 0 R14 keys print it - none of the
+356 roster conversion logs). `docs/K_ROUTE_FOR_RADIOSS_CARDS.md` carries the clause since
 the closing round.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:

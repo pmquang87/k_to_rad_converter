@@ -195,8 +195,8 @@ Prior history (before this changelog was introduced) is summarized in the
     (the S-excl prefix) - each of these four fails on `bc2910c`. Each class of
     this round's 39 tests fails on `bc2910c` or, for the boundary pins, on its
     named mutant of it (24 of the module's 51 tests pass on `bc2910c` by
-    design - pins of code that was right there, controls and the two guard
-    self-tests; the module docstring says which); the follow-up's 13 tests
+    design: pins of code that was right there, controls and the two guard
+    self-tests); the follow-up's 13 tests
     (10 in the new module, 3 in `tests/test_dt_deletion_floor.py`) form 8
     classes, each failing on its own mutant of `5108531`, and the closing
     round's pins each fail on their own mutants (above).
