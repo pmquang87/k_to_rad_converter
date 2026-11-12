@@ -3612,14 +3612,19 @@ as N keys / M models on the 356-key / 312-model roster.
     3.57e8 .. 6.06e8 and ERROR 99.9 % at t 0.03 over four runs of the same
     bytes at nt 4 (the listing does not repeat digit for digit); on a
     2 x 2 x 2-hex probe (step 2.0e-3 cut to 1.05e-4, r 0.052) KE 0.160 →
-    170.1, ERROR −99.9 %, and with ENDTIM 0.0201 (r 0.115) 0.160 → 37.16 - the
-    risk is a remainder below a sizeable fraction of the step, not r ~0.05
-    only; the remainders of the 9 / 5 R14 stop rows
-    are 0.62 - 0.85 of the step (clean last rows). An END value read on such
-    a row is not physics; the warning, the help, README and CHANGELOG name
-    it. Next: a floor on the remainder (fold a sliver into the step before),
-    measured on metal-cutting. 1 / 1 (metal-cutting, no LS energy
-    reference).
+    170.1, ERROR −99.9 %, and with ENDTIM 0.0201 (r 0.115) 0.160 → 37.16
+    (two definitions of r: 0.052 is the last step over the proposed step,
+    1.051e-4 / 2.011e-3 - the step a run without the fix point takes there -
+    and 0.102 with ENDTIM 0.0201; 0.115 is the last increment over the one
+    before by the printed times, 2.1e-4 / 1.82e-3, and 0.06 with ENDTIM 0.02,
+    or 0.112 and 0.057 by the listing's TIME-STEP column, 2.051e-4 and
+    1.051e-4 over 1.828e-3) - the risk is a remainder below a sizeable
+    fraction of the step, not r ~0.05 only; the remainders of the 9 / 5 R14
+    stop rows are 0.62 - 0.85 of the step (clean last rows). An END value
+    read on such a row is not physics; the warning, the help, README and
+    CHANGELOG name it. Next: a floor on the remainder (fold a sliver into the
+    step before), measured on metal-cutting. 1 / 1 (metal-cutting, no LS
+    energy reference).
 
 **Found on the way by the round-10 validators, older than round 10 (round-11
 candidates, no change in round 10):** (a) an explicit QEPH quad strip

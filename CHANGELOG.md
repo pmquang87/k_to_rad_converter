@@ -81,7 +81,14 @@ Prior history (before this changelog was introduced) is summarized in the
     drop, the 1.00x silence, the `--dt-del` words, the SHRF recorders x3 and their registry step, a
     README cycle-0 needle), 27 CAUGHT, each by its own new test in the focus module AND in the whole
     suite (`-x`, SUBFAILED counted), the file restored and `git status --porcelain --ignored` empty
-    after each.
+    after each. The coordinator's follow-up (findings 6.34 (4); tests only) adds eight more pins,
+    one per mutant of the coordinator's that survived the whole suite at `5108531`: the SHRF route
+    recorder at `/PROP/TYPE11` and at the `/PROP/TYPE51` of an `*INTEGRATION_SHELL` layup, the
+    membrane exclusion (ELFORM 5 / 9) of the `*PART_COMPOSITE` recorder, the sentence's cap of ten
+    (11 routes print ten and '... (11 in all)'), the eroding route's MAIN-side SURFATYP 6 / 7 drop,
+    the main side's written parts (MSID 0 / SURFBTYP 5) and a `*SET_SEGMENT` side's part in the B6
+    scope, and the `--no-erode-tsmin-rule` twins of the three deletion-floor half-request tests, each
+    mutant KILLED by its own new test in the two changed modules and in the whole suite.
   - **The eroding `/INTER/TYPE25` route** (findings 6.31 (2)(b), 6.33 (4)):
     its B6 sentence named a no-contact-stiffness law (LAW169) only on the
     parts `ish_pids` reads, so an `*CONTACT_ERODING_SINGLE_SURFACE` with
@@ -171,10 +178,13 @@ Prior history (before this changelog was introduced) is summarized in the
     RECONVERTED, not re-run; a first batch, run while a docs edit sat in the worktree, was
     discarded); the ledger and WORSE 20 / BETTER 23 unchanged; the rows naming the branch 243 -
     report section 0.36.2. Tests:
-    `tests/test_r14_round10_verify.py` (new, 39 tests); re-derived
+    `tests/test_r14_round10_verify.py` (new, 49 tests, 10 of them from the
+    follow-up); re-derived
     pins in `tests/test_r14_round10.py` (the S-excl prefix, the A replacement
     needle, the K-04 bullet record), `tests/test_cardstack_pipeline_props.py`
-    (the S-excl prefix) - each fails on `bc2910c`.
+    (the S-excl prefix) - each fails on `bc2910c`; the follow-up's 13 tests
+    (10 in the new module, 3 in `tests/test_dt_deletion_floor.py`) form 8
+    classes, each failing on its own mutant of `5108531`.
 - **R14 CAMPAIGN PARITY batch, round 10 - the fix round (the four
   validators' findings; text only, no emitted byte moves).** On the part-B
   head `ab53752`; the review diff of the round stays `git diff
