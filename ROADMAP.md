@@ -3264,7 +3264,8 @@ the window named. Part A-i: A1 SHRF → `/PROP/SHELL` Ashear by default with
 the NIP-1 / membrane / 2-D exclusion (`--no-shrf-ashear`; 0 verdict flips on
 the 14 match rows; four rows move away from LS-DYNA, named in CHANGELOG -
 contact.edge IE END −14.17 → −24.16 % and KE END +13.67 → +15.89 %, thick.k
-IE END −27.21 → −33.54 %, the transducer KE RMS 15.19 → 17.28 %, and
+IE END −27.21 → −33.54 %, the transducer KE RMS 15.19 → 17.28 % (n 947 / 948;
+its IE RMS improves 18.66 → 17.32 %, IE END +39.12 → +42.52 %), and
 constrained.spotweld.plates at its END only, IE +55.64 → +89.06 %, KE +30.96
 → −76.40 %, its welds released 21 us earlier while both RMS improve; with
 them airbag-ii's KE END +7.38 → +8.41 %, 1.0313 points against its one-twin
@@ -3393,7 +3394,21 @@ as N keys / M models on the 356-key / 312-model roster.
    a blank TSSFAC, none of them a carrier. Next: writing the deck's own factor
    as the `/DT` Tsca - it moves the 9 explicit keys / 7 models by bytes and
    their step and cycle count by 1.35x - 2.70x, and no run measures it yet (a
-   round-11 candidate); one `--ams` arm on the billet forge.
+   round-11 candidate, put to the user as a decision in the PR); one `--ams`
+   arm on the billet forge. Two of the nine explicit carriers are MATCH rows -
+   underwater_A (IE −0.85 / KE +0.97 %) and underwater_B (−0.37 / +0.49 %) -
+   that run today at 0.9 = 1.35x LS-DYNA's factor; writing 0.667 re-runs them
+   at a 1.35x smaller step. The measured split of the first step (the
+   verification round, the head bytes' runs, nt 4, against each d3hsp /
+   glstat): on underwater_A OpenRadioss's 1.141e-6 (SOLID 144) against
+   LS-DYNA's 8.37573e-7 = 1.362 = the factor 1.349 x 1.010 (103 against 137
+   cycles), and on projectile 1.363 - there the factor is the whole gap; on
+   contact.projectile 1.854e-7 against 4.71163e-8 = 3.935 = 1.349 x 2.916
+   (1182 against 2335 cycles) and on proj-errod 1.854e-7 against 7.43858e-9
+   = 24.92 = 2.703 x 9.22 (1077 against 13444 cycles): an older critical-step
+   gap remains on the eroding-projectile decks (both solvers' first step is
+   controlled by solid 940 of part 1; LS-DYNA's later steps mostly by solid
+   2353 of part 2), so writing the factor would not close it there.
 7. **The LS-faithful erosion card** (the rest of A11, recorded here rather
    than as an entry of its own): k2rad's corrected rule writes no
    `/DT/*/DEL`; the LS-faithful card (tsmin = DTMIN x dtstart by ERODE
@@ -3470,7 +3485,13 @@ as N keys / M models on the 356-key / 312-model roster.
     15.21 .. 15.25 % (n 25); friction 27.5 points in implicit against 0.55 in
     explicit; the explicit 30x twin of the same cards: END +7.13 %, RMS
     2.97 %. Next: the user's decision on an explicit quasi-static route. 1 /
-    1 (A1 moves it: −28.08 → −21.41 % at nt 2).
+    1 (A1 moves it: −28.08 → −21.41 % at nt 2). The verification round: the
+    `ed52c93` bytes are a −28 / −16 lottery (its 6 runs: −27.99 / −28.03 /
+    −15.85 at nt 4, −15.85 / −16.13 / −28.08 at nt 2), and the A1 bytes land
+    on one value between the two branches (−21.37 .. −21.41 % in 12 runs at
+    nt 4 and nt 2, no second branch seen - which does not exclude one): NO
+    gain is attributed; the regress rule's BETTER count of 23 holds by its
+    rule, 22 attributable.
 16. **`*CONTACT_2D_*`** (round-9 NOT 8): NO-GO in round 10 - TYPE25 is
     ignored in implicit (msg 232) and the implicit TYPE7 fails all three
     IMP_INT7 laws (SINT7/2 diverges at t 0.0913; SINT7/1 sticks, KE fifths 4 /
@@ -3606,6 +3627,34 @@ is written as `/IMPL/NONLIN/1` with an energy tolerance, and on a
 one-increment large load the engine accepted a state at |r| / |r0| 7.8e-2
 with a deflection 7.7 % off, on both byte sets. Next: the QEPH strip at a
 finer mesh; an `/IMPL/LINEAR` route for NSOLVR 1, measured on that coupon.
+
+**Found by the verification round of PR #148 (round-11 candidates; texts
+and tests only in round 10):** (a) **outflow at the unconstrained faces of an
+Eulerian ALE mesh** (LS-DYNA's `*CONTROL_ALE` EBC 0): LS-DYNA's own
+prescribed-velocity face admits the inflow (stagnation_A's water group, matsum
+`ALE MMG # 1`, gains 1.990e-2 t/s = 0.995 x rho v A early) and lets it out at the
+open faces (its net gain falls to 4.3e-4 t/s over (0.0175, 0.02]); OpenRadioss
+closes every neighbourless ALE face (`aflux3.F:488-524`), so the A7 inlet's
+fluid mass ends +71.65 % above LS-DYNA's (stagnation_B +63.60 %), mass RMS
+35.53 % of LS-DYNA's peak against 26.05 % with the `/IMPVEL` - the IE cost of
+A7 1b is that filling domain. Next: an outflow boundary on the free faces of
+an EBC-0 mesh, measured on the two stagnation decks. 2 keys / 2 models. (b) **the SHRF rule on `/PROP/TYPE9` / `TYPE11` /
+`TYPE51`**: those cells stay 0 / 0.833333 (the starter's 5/6) and the deck
+sentence names them; R14 reach 5 keys / 5 models (TYPE9: `tensile2.k`, the
+anisotropic cup-draw; TYPE51: `integration_shell.lobotto.beam.k`, `275key2.k`, the
+`*PART_COMPOSITE` of `3.3_Composite_Analysis.k`; LS-DYNA's d3hsp echoes 1.0 on all
+five). Next: the rule's value in those
+cells, with the coupon of A1. (c) **the eroding single-surface route's Ishape
+scope**: its `ish_pids` reads SSID = 0 only, so a SURFATYP 5 card over a
+stated SSID counts no shell for SRNDE 1 (the B6 sentence follows the written
+surface since this round; the Ishape cell is an emitted byte and was left);
+0 R14 carriers known. (d) **a scorer guard against the A5 sliver last row**
+(a campaign change: flag or skip an END row whose increment is below about
+half of the one before); the 0.36.2 scan finds no scored implicit row below
+0.5 today (lowest 0.622, `4.3_General_Nonlinearity`). (e) **a NIP-1 triangle
+section with an NTHICK-1 initial-state record** keeps N 2 and the record is
+skipped: keep N 1 where every record states NTHICK 1 (0 R14 carriers).
+(f) **the K-04 cap** is RE-OPENED (its bullet under 'Opened by the batch').
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 

@@ -188,10 +188,12 @@ Prior history (before this changelog was introduced) is summarized in the
     the all-parts `/INTER/TYPE25` over every part except the exempted
     `*SET_PART` (an implicit 6, a missing set, a set exempting every part and
     SURFATYP 7 - a `*SET_PART_TREE` branch, no reader - are dropped by
-    name). One predicate, `writer/common.single_surface_scope`, decides the
-    route at all six sites (the writer, the solid-main registry, the
-    `/TH/INTER` pick, the lever report, the joint-screw split, the K-04 skip
-    text). MEASURED (shell cards thrown at 1000 mm/s, nt 4): dropped as
+    name). Six sites share the one predicate,
+    `writer/common.single_surface_scope` (the writer, the solid-main
+    registry, the `/TH/INTER` pick, the lever report, the joint-screw split,
+    the K-04 skip text); the eroding family (`*CONTACT_ERODING_SINGLE_SURFACE`,
+    another record type) keeps its own rule, and since the verification round
+    its B6 sentence follows the surface it writes. MEASURED (shell cards thrown at 1000 mm/s, nt 4): dropped as
     before the cards passed through each other; routed they engage at
     0.3489 mm (t_s/2 + t_m/2 = 0.35), and the exempted card passes through.
     The drop text no longer says the set 'names no part, part set or node
@@ -310,7 +312,11 @@ Prior history (before this changelog was introduced) is summarized in the
     = 0.175 (0.1009 vs 0.1760 mm with `--inter-gapmin`), and on the two
     roster carriers the unclamped T is not better (bend.k IE RMS 1.36 ->
     0.85 %, KE END -45.60 -> -83.08 %; adpips.k IE RMS 2.61 -> 3.37 %, still a
-    match). The cap stays; no byte moves.
+    match). The cap stays; no byte moves. (The verification round RE-OPENED
+    it for round 11: those bend.k figures are the `ed52c93` bytes'; on the
+    round-10 bytes, which A1 moves, lifting the cap improves every channel -
+    IE RMS 1.30 -> 0.79 %, KE RMS 9.40 -> 7.89 %, IE END -1.70 -> -0.52 %, KE
+    END -30.36 -> -6.83 %, nt 4, n 500; the cap stays for round 10.)
   - **The round-10 docs** (0 bytes). README: a row for every new flag of the
     three stages in *R14 parity round 10 options* (the parser-vs-README test
     holds them), B1 / B3 / B4 / B7 / B8 / B9's sites. ROADMAP: the queue
@@ -390,7 +396,30 @@ Prior history (before this changelog was introduced) is summarized in the
     pair; the named COST is the IE: END +839.05 %, IE RMS 172.71 -> 206.79 %
     (a single-material light fluid smears the water into the light cells;
     LS-DYNA keeps the vacuum as a phase). stagnation_B KE END +18.60 %, KE RMS
-    60.18 -> 10.03 %. The inflow work is the global EXT-WORK
+    60.18 -> 10.03 % (both RMS pairs against the light fluid ALONE, window
+    (3.85435e-05, 0.0199996], n 500; the `ed52c93` bytes die at cycle 832 and
+    have no full-window RMS); its IE END is +2110498.93 % and its IE RMS
+    42547.07 % of LS-DYNA's peak (36.8284; LS-DYNA's IE ends at 1.24088 on B
+    against 2788.98 on A): the converted stagnation_B differs from
+    stagnation_A by one unused `/FUNCT/2` only (six lines; `_0001` identical),
+    because its coupling's PFAC -2 (a penalty curve) and DAMP 1.0 are not
+    converted (the conversion log names PFAC), so OpenRadioss runs A's
+    physics on B. THE MASS BALANCE (the verification round, findings 6.31
+    (1); LS-DYNA's water group = matsum's `ALE MMG # 1` entity, |mom| /
+    |rbv|, whose KE equals glstat's): LS-DYNA's prescribed-velocity face
+    admits the inflow too - the water group gains 1.990e-2 t/s over
+    (3.85e-5, 5.19e-4] = 0.995 x rho v A, and the inlet's fluid mass
+    (OpenRadioss's TOTAL MASS 5.005e-4 -> 9.005e-4, rho v A t exactly)
+    equals it to +0.11 / +0.43 / +1.41 % at t 1e-3 / 2e-3 / 3e-3 - but
+    LS-DYNA lets the fluid OUT at the unconstrained faces of its Eulerian
+    mesh (`*CONTROL_ALE` EBC 0; its net gain falls to 4.3e-4 t/s over
+    (0.0175, 0.02]), while OpenRadioss closes every neighbourless ALE face:
+    the fluid mass ends +71.65 % above LS-DYNA's on stagnation_A (+153.8 %
+    over its start against LS-DYNA's +47.88 %) and +63.60 % on stagnation_B;
+    the mass RMS is 35.53 % of LS-DYNA's peak with the inlet against 26.05 %
+    with the `/IMPVEL` kept (which holds the start mass, -32.37 % at the
+    end). The IE cost above is that filling domain; the outflow is a ROADMAP
+    item. The inflow work is the global EXT-WORK
     (`ebcs8_inlet.F90:646/656`): stagnation_A 3.42e-5 / 0.122 / 2.467 / 2.519
     / 22.69 / 818.1 at the LS bndout instants t 1.20165e-4 / 1.60976e-4 /
     2.01787e-4 / 2.40330e-4 / 1.80021e-3 / 2.00018e-2 against LS-DYNA's
@@ -459,10 +488,15 @@ Prior history (before this changelog was introduced) is summarized in the
     RMS 10.85 -> 4.01 %, KE RMS 14.24 -> 10.86 %, IE fifths -13.33 / -82.43
     / +26.00 / -2.40 / +45.90 -> -96.70 / -99.15 / +11.60 / -3.36 / -15.35 %
     (the first two worse), KE fifths -65.32 / -84.68 / +22.03 / +20.65 /
-    -92.83 -> -98.86 / -99.15 / +17.87 / +5.81 / -91.48 %, force RMS of LS's
-    peak (LS rcforc against the `/TH/INTER` impulse differenced) contact 1
-    448.66 -> 41.68 %, the binder (contact 2) 108.23 -> 93.23 %, contact 3
-    414.13 -> 40.27 %; the capped run's ERROR column hits the -99.9 % print
+    -92.83 -> -98.86 / -99.15 / +17.87 / +5.81 / -91.48 %, contact force RMS
+    of LS's peak (LS rcforc's SURFA resultant against the `/TH/INTER` impulse
+    differenced; re-measured by the verification round with ONE scorer on
+    this run pair, the total force |FN + FT| = the like-for-like of the
+    resultant): the punch (contact 1) 474.43 -> 46.72 %, the binder
+    (contact 2) 92.00 -> 92.21 %, the die (contact 3) 441.24 -> 44.16 % (the
+    normal force FN alone 448.56 -> 41.63 / 91.24 -> 91.41 / 414.12 ->
+    40.19 %; the binder's 108.23 -> 93.23 % shipped before is not
+    reproduced); the capped run's ERROR column hits the -99.9 % print
     clamp on 569 of 2511 rows from cycle 490 (the base's worst -98.6 %; the
     column leaves out the contact energy) - the one roster row whose listing
     newly trips the skill launcher's strict audit (FLAG energy-error-clamped,
@@ -476,8 +510,9 @@ Prior history (before this changelog was introduced) is summarized in the
     -> 7.884e6: `ed52c93` parks 2.468e7 of it in CONTACT_ENERGY); against the
     `ed52c93` bytes (A1 + A8 on this deck; the physics validator's run, n 61,
     nt 4) every LS-DYNA channel improves: IE RMS 10.94 -> 4.01 %, KE RMS
-    14.28 -> 10.86 %, the punch / die force RMS 473.84 -> 46.72 % and 440.84
-    -> 44.16 % of the LS peaks. A8 stays the default (findings 6.26 (2)).
+    14.28 -> 10.86 %, the punch / die total force |FN + FT| RMS 473.84 ->
+    46.72 % and 440.84 -> 44.16 % of the LS peaks (the binder 92.01 ->
+    92.21 %). A8 stays the default (findings 6.26 (2)).
     mat_transversely_anisotropic.cup-
     draw (t_end 0.015, ALONE, n 150 (9.99569e-05, 0.0149997]) 70728 -> 63169
     cycles (0.8931), IE END +13.10 -> +8.76 %, IE fifths +93.78 / +121.04 /
@@ -491,8 +526,9 @@ Prior history (before this changelog was introduced) is summarized in the
     -2.79 %, IE RMS 1.25 -> 0.99 %, KE RMS 39.60 -> 36.19 %.
     control_adaptive.cup-draw = A1 + A4 + A8 (t_end 7e-4, n 699 (8.39908e-07,
     6.98827e-04]) 2326 -> 2221 cycles (0.9549), IE END +38.39 -> +39.49 %,
-    IE RMS 12.86 -> 13.02 %, KE RMS 2.67 -> 2.61 %, contact-1 force RMS
-    12.92 -> 13.66 %; the punch's DY = its curve's integral at every fifth on
+    IE RMS 12.86 -> 13.02 %, KE RMS 2.67 -> 2.61 %, its three contact forces
+    |FN + FT| 13.49 / 15.40 / 20.79 -> 14.34 / 15.62 / 22.16 % (all worse;
+    FN alone 12.92 / 15.38 / 20.61 -> 13.66 / 15.59 / 21.88 %); the punch's DY = its curve's integral at every fifth on
     both arms; the minimum printed step 2.53e-7 -> 3.09e-7 stays above A4's
     Tmin 2.25e-7 (A4 does not engage), MAS.ERR 0. The A9 sentence names the
     capped interfaces on its two carriers among the movers
@@ -573,7 +609,11 @@ Prior history (before this changelog was introduced) is summarized in the
     FLOW-TRACKING sentence names the package. Movers: quadrature_B / _C by
     bytes (2 keys / 1 model); bird_B, forging_B, stagnation_A / _B,
     cylinder_impact_B, ale_wavehitcol by text; bird-el (a void without CLIS)
-    byte- and text-identical. Tests: `tests/test_r14_round10.py`
+    byte- and text-identical. OUTSIDE the roster (named by the verification
+    round, findings 6.31 (2)(e)): Ryan_Lee `W12_SETUP_Water_ALE_Elastic` (4
+    files, 1 model) moves by bytes under the 2b default - a LAW6 copy at 1e-3
+    x RO and a second `/INTER/TYPE18` - and no run of it exists: unmeasured.
+    Tests: `tests/test_r14_round10.py`
     `ClisDt0Estimator`, `InitialVoidCopy`, `ClisPfacStiffness`,
     `Round10FlagWiringA2`, `Round10OptInWiringA2`; moved, each because A10 2b writes the void copy on a CLIS-coupled *INITIAL_VOID deck (round 10):
     `tests/test_r14_triage_6.py` `InitialVoidFloorTests.test_ONE_decision_the_warning_reads_the_record_not_the_option`,
@@ -674,7 +714,8 @@ Prior history (before this changelog was introduced) is summarized in the
     deviation / not_comparable keys. Four rows move AWAY from LS-DYNA,
     named (the campaign pass, report section 0.36, nt 4): contact.edge IE END
     -14.17 -> -24.16 % and KE END +13.67 -> +15.89 %, thick IE END -27.21 ->
-    -33.54 %, transducer KE RMS 15.19 -> 17.28 %, and
+    -33.54 %, transducer KE RMS 15.19 -> 17.28 % (n 947 / 948) while its IE
+    RMS improves 18.66 -> 17.32 % (IE END +39.12 -> +42.52 %), and
     constrained.spotweld.plates at its END only - IE +55.64 -> +89.06 %, KE
     +30.96 -> -76.40 % (the scored KE, translational + rotational, 979.49 ->
     176.48 against LS-DYNA's 747.951; IE 3428 -> 4164 against 2202.51). Its
@@ -798,7 +839,8 @@ Prior history (before this changelog was introduced) is summarized in the
     and the CardStack archive's 39 explicit DT2MS < 0 files move their Tmin
     cell; three of the user's own files map a quoted Tmin to DT2MS one to one
     and are now off by 1/TSSFAC (DT2MS = -Tmin / TSSFAC): the CardStack recipe
-    section 8, `fem-pipeline/scripts/results_check.py:201` and
+    section 8, `fem-pipeline/scripts/results_check.py:193` / `:246` (the
+    verification round corrected the cited line: `:201` is MOTION_FIX) and
     `run-openradioss/scripts/audit_or_run.py:992` - not edited by this
     round. Moved pins (re-derived, the product hand-computed):
     `test_cardstack_pipeline` `_BOOL_LEVERS` row -> True (NewLeversWiring x4,
@@ -842,9 +884,15 @@ Prior history (before this changelog was introduced) is summarized in the
     rows. No "gain" is claimed. The sliver: `IMP_DTF` cuts the step to the
     remainder whatever its size (`imp_dt.F:311-320`), so where the remainder
     is a sliver of the step the LAST row is an integration artifact - on
-    `efg/metal-cutting/main.k` (step 2.0e-4 cut to 1.0e-5) KE 91.3 -> 6.06e8
-    and ERROR 99.9 % at t 0.03, on a 2 x 2 x 2-hex probe (2.0e-3 cut to
-    1.05e-4) KE 0.160 -> 170.1, ERROR -99.9 %; the R14 stop rows' remainders
+    `efg/metal-cutting/main.k` (step 2.0e-4 cut to 1.0e-5, ratio 0.05) the
+    last row's KE 52.3 .. 111.0 -> 3.57e8 .. 6.06e8 and ERROR 99.9 % at t
+    0.03 over four runs of the same bytes at nt 4 (the A-i spec 91.3 ->
+    6.06e8, this implementation 111.0 -> 5.52e8, the campaign's 0.36 run
+    60.77 -> 4.562e8, the physics-A verifier 52.26 -> 3.565e8 - the listing
+    does not repeat digit for digit; the verification round restated the
+    single sample as this range), on a 2 x 2 x 2-hex probe (2.0e-3 cut to
+    1.05e-4, ratio 0.06) KE 0.160 -> 170.1, ERROR -99.9 %, on that probe
+    with ENDTIM 0.0201 (ratio 0.115) KE 0.160 -> 37.16; the R14 stop rows' remainders
     are 62 - 85 % of the step (clean last rows). Movers: 21 R14 keys / 16
     models by the two engine lines (18 runnable + 3 giants); 0 status /
     verdict moves (MEASURED in report §0.36). Tests:

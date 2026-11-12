@@ -154,8 +154,15 @@ decks should start from
   0.67. MEASURED on the R14 billet-forge deck (nt 4): the step then equals
   LS-DYNA's 1.08e-7 (1.2e-7 without it), 13889 cycles = LS-DYNA's 13889, KE
   END -5.13 % against +16.99 %, KE RMS 8.54 -> 1.74 % of the LS peak over its
-  150 LS times; 8 R14 keys / 8 models move one engine cell.
-  `--no-dt2ms-tssfac-product` writes `|DT2MS|`.
+  150 LS times; 8 R14 keys / 8 models move one engine cell. The billet's
+  verdict flip (deviation -> match) is a match of two MASS-SCALED runs:
+  LS-DYNA adds 199.18 % of its physical mass 2.24e-5 by the deck's own DT2MS
+  -1.2e-7 (glstat's last block, added mass 4.4617e-5), OpenRadioss adds
+  248.2 % on the `ed52c93` bytes (MAS.ERR 2.482 at cycle 12500, 5.561e-5) and
+  182.7 % on the round-10 bytes (1.827 at LS-DYNA's own 13889 cycles,
+  4.092e-5), and the skill launcher's strict audit refuses the row on both
+  byte sets (FLAG added-mass, above 5 %). `--no-dt2ms-tssfac-product` writes
+  `|DT2MS|`.
 - `--print-every N` — write the engine `/PRINT/-N`: a status line every N
   cycles in `<stem>_0001.out` and on the console, N = 1..9999 (the engine
   reads the cell as I5, `freform.F:1563`). Default: `/PRINT/-IKEDIT` for a
@@ -370,7 +377,13 @@ as underscores.
   section kept at N 2 runs at the starter's 5/6), on the membranes ELFORM 5 /
   9, the 2-D ELFORMs 12-15, 43, 44, 52, 55, +-29 and k2rad's own placeholder
   sections; each kept or substituted value is named. The `/PROP/TYPE9` /
-  `TYPE11` / `TYPE51` routes keep their own rules. MEASURED: each Ashear
+  `TYPE11` / `TYPE51` routes keep their own cells (0 or 0.833333, the
+  starter's 5/6 either way) and, since the verification round, ONE sentence
+  per deck names every section on them whose LS-DYNA factor is not 5/6 (R14:
+  5 keys / 5 models - `tensile2.k` and the anisotropic cup-draw on TYPE9,
+  `integration_shell.lobotto.beam.k`, `275key2.k` and the `*PART_COMPOSITE`
+  of `3.3_Composite_Analysis.k` on TYPE51; LS-DYNA echoes `shear area factor
+  = 1.0` on all five; carrying the rule there is a ROADMAP item). MEASURED: each Ashear
   reproduces its own Timoshenko closed form to -0.041 % (L/t 3) / -0.018 %
   (L/t 5) on quads and -0.024 / -0.025 % on triangles; LS-DYNA's d3hsp echoes
   `shear area factor = 1.0` on all 2642 R14 shell parts with a blank, 0 or
@@ -378,7 +391,8 @@ as underscores.
   among them stay match (largest END move 1.54 points). The named losses
   (nt 4): contact.edge IE END -14.17 -> -24.16 % (KE END +13.67 -> +15.89
   %), thick.k IE END -27.21 -> -33.54 %, the transducer KE RMS 15.19 ->
-  17.28 %, and constrained.spotweld.plates at its END only (IE +55.64 ->
+  17.28 % (n 947 / 948) while its IE RMS improves 18.66 -> 17.32 % (IE END
+  +39.12 -> +42.52 %), and constrained.spotweld.plates at its END only (IE +55.64 ->
   +89.06 %, KE +30.96 -> -76.40 %: its welds release 21 us earlier and the
   END samples the ringing after the release, while both RMS improve, IE
   34.01 -> 30.61 %, KE 34.29 -> 24.10 %); with them airbag-ii's
@@ -433,7 +447,9 @@ as underscores.
   inertness is named in a warning. Off by default because it worsens the
   measured history on the shipped adaptive step: `ex_14_solid_elform_1` with
   the end fix point, IE RMS 4.51 -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS
-  peak over its 200 LS times (nt 4 = nt 2). Not written on a static deck
+  peak over its 200 LS times (nt 4 = nt 2). No case measured in round 10
+  favours it: choose it only where a run of your own deck shows a gain. Not
+  written on a static deck
   (the card alone turns the run dynamic, `freimpl.F:171`), for an LCID > 0 or
   a per-DOF card, or beside `*DAMPING_PART_*` cards - each refusal named
   (the section under Implicit dynamic notes below has the measurements).
@@ -474,13 +490,29 @@ as underscores.
   in place of the `/IMPVEL` of the covered nodes: an `/IMPVEL` on an Eulerian
   ALE boundary moves the nodes and admits no material (`aflux3.F:488-524`,
   every neighbourless ALE face is a slip wall), while the EBCS imposes the
-  velocity every cycle and brings the fluid in (`ebcs8_inlet.F90:693-716`).
+  velocity every cycle and brings the fluid in (`ebcs8_inlet.F90:693-716`) -
+  as LS-DYNA's own prescribed-velocity face does (its water group gains
+  0.995 x rho v A early on).
   MEASURED on stagnation_A with the vacuum light fluid (nt 4, 500 LS times in
   (3.85e-5, 0.02]): KE END +25.91 %, KE RMS 53.09 -> 14.40 % against the
   light fluid alone; the named COST is the IE: END +839.05 %, RMS 172.71 ->
   206.79 % (a single-material light fluid smears the water into the light
   cells; LS-DYNA keeps the vacuum as a phase); stagnation_B KE RMS 60.18 ->
-  10.03 %. Refused by name beside a LAW0 vacuum (an inlet there dies where the
+  10.03 % (both RMS pairs against the light fluid ALONE, window (3.85435e-05,
+  0.0199996], n 500; the `ed52c93` bytes die at cycle 832), while B's IE END
+  is +2110498.93 % and its IE RMS 42547.07 % of LS-DYNA's peak 36.8284: the
+  converted B differs from A by one unused `/FUNCT/2` only, because its
+  coupling's PFAC -2 (a penalty curve) and DAMP 1.0 are not converted, so
+  OpenRadioss runs A's physics on B (LS-DYNA's IE ends at 1.24 on B, 2789 on
+  A). THE MASS BALANCE (MEASURED: LS-DYNA's water group = matsum's `ALE MMG #
+  1`, |mom| / |rbv|, its KE equal to glstat's): the inlet's fluid mass equals
+  LS-DYNA's to +0.11 / +0.43 / +1.41 % at t 1e-3 / 2e-3 / 3e-3, but LS-DYNA
+  lets the fluid out at the unconstrained faces of its Eulerian mesh
+  (`*CONTROL_ALE` EBC 0) and OpenRadioss closes every neighbourless ALE face,
+  so the fluid mass ends +71.65 % above LS-DYNA's on stagnation_A (+63.60 %
+  on B); the mass RMS is 35.53 % of LS-DYNA's peak against 26.05 % with the
+  `/IMPVEL` kept (which holds the start mass) - the IE cost is that filling
+  domain (the outflow is a ROADMAP item). Refused by name beside a LAW0 vacuum (an inlet there dies where the
   `/IMPVEL` deck dies), for a VAD other than 0, a DOF other than 1 / 2 / 3, a
   BIRTH / DEATH window, a curve that is not a `*DEFINE_CURVE`, a face node
   that does not hold the two other translations (the inlet imposes all
@@ -637,6 +669,33 @@ byte moves):
   sentence includes a solid spot-weld part; the 2a sentence of a CLIS set
   with an A7 light fluid names the nodal first step; the package sentence
   names the bird_B plate's energy split.
+
+Changed texts of the round-10 verification round (warnings and help only;
+no emitted byte moves; R14: 37 keys / 32 models move by warning text and 0
+by bytes, by two scanners - report section 0.36.2):
+
+- **The shells the SHRF rule does not reach are named**: one sentence per
+  deck lists the sections on `/PROP/TYPE9` (Ashear 0), `/PROP/TYPE11` and the
+  `/PROP/TYPE51` of a layup (0.833333), which run at the starter's 5/6
+  where LS-DYNA runs the stated SHRF or its default 1.0.
+- **The eroding `/INTER/TYPE25`** names a no-contact-stiffness law on the
+  parts of the surface it writes (a SURFATYP 5 card over a stated SSID) and
+  drops a SURFATYP 6 / 7 side by the type's meaning. Six sites share the one
+  predicate `single_surface_scope`; the eroding family keeps its own rule,
+  and its sentence follows the surface it writes.
+- **The conditional-TSSFAC sentence** is silent where OpenRadioss's own
+  default equals LS-DYNA's to the printed digit (a routed 2-D deck's 0.67
+  against 0.667) and names the `/DT .../DEL` card under `--dt-del`.
+- **Corrected wordings**: A7's conversion sentence and help carry the mass
+  balance; A8's sentence and help name the force definition (|FN + FT|);
+  the routed implicit N2S caution names the bytes of its 125-run spread and
+  the round-10 bytes' 12 runs; the end-fix-point sentence quotes the
+  metal-cutting sliver as a range of four runs; the `--shrf-ashear` help
+  names the transducer's mixed pair; the `--implicit-rayleigh-damping` help
+  says no measured case favours it; the A2 sentence's figure is the
+  coupon's; the A1 exclusion sentence covers the N-1 property; the
+  initial-state keep says what happens to an NTHICK 1 record; the false
+  /PRELOAD 'at cycle 0' is gone from three more sites.
 
 ### Python API
 
@@ -3923,10 +3982,12 @@ model): before, the driven punch never moved (node 1 DY 0 mm at every fifth of
 t_end; 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, = the LS
 nodout) and internal energy ended +582.00 % against LS-DYNA; with the part
 drive alone it ends +53.91 % (RMS 393.31 → 81.05 % of the LS peak over the 25
-LS times in (1e-5, 1.1e-3], nt 4 = nt 2), and the shipped default — with the
-implicit node-to-surface route below (`--implicit-n2s-type7`) — ends −0.78 ..
+LS times in (1e-5, 1.1e-3], nt 4 = nt 2), and the pre-round-10 default — with
+the implicit node-to-surface route below (`--implicit-n2s-type7`) — ends −0.78 ..
 −28.12 %, RMS 7.21 .. 15.26 % (125 runs at nt 4 and nt 2, run to run on three
-branches). `solidof.k`,
+branches); on the round-10 bytes (A1 writes doorbeam's two Ashear cells) 12
+runs at nt 4 and nt 2 end at −21.37 .. −21.41 %, no second branch seen in them
+(which does not exclude one). `solidof.k`,
 whose CNRB shares the id of a DEFORMABLE part, is byte-identical.
 
 `*CONSTRAINED_INTERPOLATION` / `_LOCAL` → `/RBE3` (id = `ICID`, `I_modif = 2` so
@@ -5524,14 +5585,17 @@ spot-weld / tiebreak contact of its own) it stays beside the routed contact
 and carries its `FS` (it duplicates the routed pairs; two routed contacts with
 different `FS` leave it frictionless, named); beside such a contact no stub is
 written and the routed warning says so. MEASURED on
-`implicit/basic-examples/springback-i/doorbeam.k` with A1's part drive (125
+`implicit/basic-examples/springback-i/doorbeam.k` with A1's part drive, on the
+pre-round-10 bytes (125
 runs of the same bytes at nt 4 and nt 2 — the round-9 record's 27 and the
 post-review round's 98 — 25 LS times in (1e-5, 1.1e-3]): IE END −0.78 ..
 −28.12 %, RMS 7.21 .. 15.26 % of the LS peak, run to run on three branches
 (102 runs at −27.76 .. −28.12 %, 21 at −15.85 .. −16.27 %, both at nt 4 and
 nt 2, and two single nt-4 runs nearer LS: −8.36 % / RMS 7.59 % and −0.78 % /
 RMS 7.21 %), where the TYPE25 ended +53.91 % / 81.05 % and 35 against 39
-cycles. **Check that the
+cycles; on the round-10 bytes (A1's two Ashear cells) 12 runs at nt 4 and nt 2
+end at −21.37 .. −21.41 % (RMS 14.67 .. 14.69 %) - no second branch seen,
+which does not exclude one. **Check that the
 contact carries load**: with four contact nodes on a coarse RIGID base the
 outcome depends on the geometry - on one two-block coupon (a 10 × 10 × 5 mm
 block on a 2 × 2 × 1-hex rigid base) the route ends NORMAL TERMINATION with
@@ -7198,7 +7262,8 @@ and implicit, nt 4 = nt 2); 148 R14 keys / 132 models move by the Ashear
 cells only, and the 14 match rows among them stay match (largest END move
 1.54 points); four rows move AWAY from LS-DYNA, each named in CHANGELOG
 (nt 4): contact.edge IE END -14.17 -> -24.16 % (KE END +13.67 -> +15.89 %),
-thick.k IE END -27.21 -> -33.54 %, the transducer KE RMS 15.19 -> 17.28 %,
+thick.k IE END -27.21 -> -33.54 %, the transducer KE RMS 15.19 -> 17.28 % (n
+947 / 948; its IE RMS improves 18.66 -> 17.32 %, IE END +39.12 -> +42.52 %),
 and constrained.spotweld.plates at its END only (IE +55.64 -> +89.06 %, KE
 +30.96 -> -76.40 %: its welds release 21 us earlier and the END samples the
 ringing after the release, while both RMS improve, IE 34.01 -> 30.61 %, KE

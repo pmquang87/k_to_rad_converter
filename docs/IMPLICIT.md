@@ -220,10 +220,11 @@ such a model EXPLICIT until the engine is fixed.
   implicit stub where k2rad injects one (a deck with no contact of its own;
   the warning names a deck whose own contacts leave no stub), which carries
   the contact's friction when every routed contact agrees on it. MEASURED on
-  doorbeam (part-driven since A1): IE END -0.78 .. -28.12 %, RMS 7.21 ..
-  15.26 % of the LS peak over 125 runs at nt 4 and nt 2, run to run on three
-  branches (mostly -27.76 .. -28.12 %), where the TYPE25 ended +53.91 % /
-  81.05 %. A 4-node one-way TYPE7 on a coarse RIGID base can end NORMAL with
+  doorbeam (part-driven since A1), on the pre-round-10 bytes: IE END -0.78
+  .. -28.12 %, RMS 7.21 .. 15.26 % of the LS peak over 125 runs at nt 4 and
+  nt 2, run to run on three branches (mostly -27.76 .. -28.12 %), where the
+  TYPE25 ended +53.91 % / 81.05 %; on the round-10 bytes 12 runs end at
+  -21.37 .. -21.41 % (no second branch seen, which does not exclude one). A 4-node one-way TYPE7 on a coarse RIGID base can end NORMAL with
   the block through - a silent failure where the TYPE25 stops loudly - or
   hold where the TYPE25 lets the block through behind a NORMAL banner, and
   with the nodes over the base's corners both let it through: the outcome
