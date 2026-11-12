@@ -32,6 +32,7 @@ from .common import (
     _part_node_sets,
     _split_shell_eids_by_topology,
     rigid_part_ids,
+    single_surface_scope,
 )
 
 __all__ = [
@@ -656,8 +657,9 @@ def _solid_contact_master_pids(state: ConversionState) -> Set[int]:
         return set()
     out: Set[int] = set()
     for c in state.contacts_single:
-        if c.ssid == 0:
-            out |= all_solid_pids                      # all-parts self-contact
+        scope = single_surface_scope(state, c)         # round 10, B2
+        if scope is not None:
+            out |= all_solid_pids & set(scope)         # all-parts self-contact
         else:
             out |= _contact_master_pids(state, c.ssid, c.sstyp) & all_solid_pids
     for c in state.contacts_surf2surf:
@@ -2046,14 +2048,58 @@ def _implicit_rigid_secondary_note(state: ConversionState,
         + flag)
 
 
+#: Vol I R17 p.11-25: the SURFATYP / SURFBTYP 5 / 6 / 7 meanings (round 10,
+#: B2 - the drop text named the resolver's failure, "it names no part, part
+#: set or node set ...", which is false for these types)
+_STYP567_MEANING = {
+    5: "Include all non-spot-weld parts (the SURFA field is ignored)",
+    6: ("Part set ID for exempted parts. All non-exempted parts (except "
+        "spot-weld parts) are included in the contact"),
+    7: "Branch ID; see *SET_PART_TREE",
+}
+
+
+def _styp567_clause(sid: int, styp: int) -> str:
+    """Round 10, B2: why a SURFATYP / SURFBTYP 5 / 6 / 7 side resolved to
+    nothing on a route with no resolver for it - the type's meaning instead
+    of the false "names no part, part set or node set". A CLAUSE (no closing
+    punctuation: :func:`_drop_interface` closes it)."""
+    what = {5: "every non-spot-weld part of the model",
+            6: f"every part except those of *SET_PART {sid}",
+            7: f"the parts of *SET_PART_TREE branch {sid}"}[styp]
+    dyna = {5: "dyna2rad writes a /SET/GENERAL ALL clause for it",
+            6: "dyna2rad writes an ALL clause minus the set for it",
+            7: "dyna2rad does not convert it either"}[styp]
+    return (f"SURFATYP {styp} means '{_STYP567_MEANING[styp]}' (Vol I R17 "
+            f"p.11-25), i.e. {what}, and this route has no resolver for that "
+            f"type ({dyna}, convertcontacts.cxx:268-291)")
+
+
+def _styp567_remedy(sid: int, styp: int) -> str:
+    """Round 10, B2: the REMEDY of a SURFATYP / SURFBTYP 5 / 6 / 7 side
+    (:func:`_styp567_clause`)."""
+    if styp == 5:
+        return ("REMEDY: name the parts in a *SET_PART and state SURFATYP 2 "
+                "(a single-surface card with SURFATYP 5 takes the SSID = 0 "
+                "route, unless --no-surfatyp-all-parts is set).")
+    if styp == 6:
+        return (f"REMEDY: invert *SET_PART {sid} by hand into a *SET_PART of "
+                "the parts the contact should hold and state SURFATYP 2.")
+    return ("REMEDY: list the branch's parts in a *SET_PART and state "
+            "SURFATYP 2 (k2rad has no *SET_PART_TREE reader).")
+
+
 def _secondary_side_remedy(sid: int, styp: int) -> str:
     """REMEDY text for a contact SECONDARY side that resolved to no nodes.
 
     Named per TYPE, because "check that SSID names a part, part set or node
     set" is the wrong advice for the two set types: SURFATYP 0 and 1 name a
     *SET_SEGMENT and a *SET_SHELL, and telling the reader to point them at a
-    part is telling them to state a type the cell does not mean.
+    part is telling them to state a type the cell does not mean - nor for
+    SURFATYP 5 / 6 / 7 (round 10, B2: :func:`_styp567_remedy`).
     """
+    if styp in (5, 6, 7):
+        return _styp567_remedy(sid, styp)
     if styp in (0, 1) and sid:
         kind = "*SET_SEGMENT" if styp == 0 else "*SET_SHELL"
         return (f"REMEDY: add the {kind} {sid} this side names (SURFATYP "
@@ -2076,6 +2122,8 @@ def _describe_empty_main(state: ConversionState, sid: int, styp: int) -> str:
     """
     if styp in (0, 1) and sid:
         return _styp01_missing_note(state, sid, styp)
+    if styp in (5, 6, 7):                                   # round 10, B2
+        return _styp567_clause(sid, styp)
     if styp == 4:
         return (f"SURFATYP=4 makes {sid} a *SET_NODE id, and a node group has "
                 "no FACES — OpenRadioss builds a main /SURF from segments, "
@@ -2087,6 +2135,8 @@ def _describe_empty_main(state: ConversionState, sid: int, styp: int) -> str:
 
 
 def _main_side_remedy(state: ConversionState, sid: int, styp: int) -> str:
+    if styp in (5, 6, 7):                                   # round 10, B2
+        return _styp567_remedy(sid, styp)
     if styp in (0, 1) and sid:
         kind = "*SET_SEGMENT" if styp == 0 else "*SET_SHELL"
         return (f"REMEDY: add the {kind} {sid} this side names, or restate the "
@@ -2106,6 +2156,10 @@ def _describe_empty_secondary(diag: Dict[str, int], sid: int, styp: int,
             return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} "
                     "resolved to no nodes at all — "
                     + _styp01_missing_note(state, sid, styp))
+        if styp in (5, 6, 7):                               # round 10, B2
+            return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} "
+                    "resolved to no nodes at all — "
+                    + _styp567_clause(sid, styp))
         return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} resolved to "
                 "no nodes at all — it names no part, part set or node set that "
                 "carries shell/solid elements in this deck")
@@ -2404,10 +2458,10 @@ def _s2s_type25_route(state: ConversionState, c: ContactAutoSurf2Surf,
     tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt, kw, "TYPE25",
                                  dt_was_written=True)
     # CardStack K-16: Card E SRNDE 1 -> Ishape 2
-    ishape = _type25_ishape(
-        state, c, kw, c.inter_id,
-        _contact_master_pids(state, c.ssid, c.sstyp)
-        | _contact_master_pids(state, c.msid, c.mstyp))
+    both_pids = (_contact_master_pids(state, c.ssid, c.sstyp)
+                 | _contact_master_pids(state, c.msid, c.mstyp))
+    ishape = _type25_ishape(state, c, kw, c.inter_id, both_pids)
+    _warn_type25_no_contact_stiffness(state, c.inter_id, both_pids)  # B6
     lines += _emit_inter_type25(
         c.inter_id, c.title, surf1, surf2, istf=4, igap=2, idel=_TYPE25_IDEL,
         iedge=_TYPE25_IEDGE_NONE, stfac=stfac, fric=fric, tstart=tstart,
@@ -2429,6 +2483,102 @@ def _s2s_type25_route(state: ConversionState, c: ContactAutoSurf2Surf,
     return True
 
 
+def _warn_surfatyp_route(state: ConversionState, c: ContactAutoSingle,
+                         kw: str, scope: List[int],
+                         all_pids: List[int]) -> None:
+    """Round 10, B2 (default ON, ``--no-surfatyp-all-parts``): name the
+    all-parts route a single-surface card with a stated SSID and SURFATYP 5
+    or 6 took (:func:`~k2rad.writer.common.single_surface_scope`)."""
+    route = (f"/INTER/TYPE25/{c.inter_id} self-contact (one /SURF/PART/EXT, "
+             "surf_ID2 = 0) on this explicit deck" if not state.is_implicit
+             else "the all-parts node→surface /INTER/TYPE7 recipe of an "
+             "SSID = 0 card on this implicit deck")
+    if c.sstyp == 5:
+        head = (f"SURFATYP 5 with SSID = {c.ssid}: "
+                f"'{_STYP567_MEANING[5]}' (Vol I R17 p.11-25), so SSID = "
+                f"{c.ssid} is ignored and the card takes the SSID = 0 "
+                f"all-parts route → {route}")
+        measured = (" MEASURED (two t 0.35 shell cards, one thrown at 1000 "
+                    "mm/s, nt 4): dropped as before, they passed through each "
+                    "other; routed, they engage at 0.3489 mm (t_s/2 + t_m/2 = "
+                    "0.35)" + (" - on the explicit route; this implicit route "
+                               "is the SSID = 0 recipe's." if state.is_implicit
+                               else "."))
+    else:
+        exempt = sorted(set(all_pids) - set(scope))
+        head = (f"SURFATYP 6 with SSID = {c.ssid}: *SET_PART {c.ssid} names "
+                f"the EXEMPTED parts - '{_STYP567_MEANING[6]}' (Vol I R17 "
+                f"p.11-25) - → {route} over the {len(scope)} other part(s); "
+                f"part(s) {', '.join(str(p) for p in exempt[:10])}"
+                + (" ..." if len(exempt) > 10 else "") + " left out")
+        measured = (" MEASURED (three t 0.35 shell cards, two thrown at 1000 "
+                    "mm/s, nt 4, one of them exempted): dropped as before, "
+                    "both passed through; routed, the included card engages "
+                    "at 0.3489 mm (t_s/2 + t_m/2 = 0.35) and the exempted "
+                    "one passes through, as EQ.6 reads. An implicit SURFATYP "
+                    "6 card is dropped by name (no probe).")
+    state.warn(
+        f"*{kw} {c.inter_id}: {head}. LS-DYNA leaves spot-weld parts out of "
+        f"a SURFATYP {c.sstyp} side; k2rad's surface lists every part as the "
+        "SSID = 0 route does (a /SURF holds no 1-D element, so a beam spot "
+        "weld adds no segment; a solid spot-weld part is included and adds "
+        "its faces)." + measured + " --no-surfatyp-all-parts "
+        "drops the card as before (round 10).")
+
+
+def _surfatyp_drop(state: ConversionState,
+                   c: ContactAutoSingle) -> Tuple[str, str]:
+    """Round 10, B2: ``(cause, remedy)`` of a single-surface card with a
+    stated SSID and SURFATYP 5 / 6 / 7 that takes no route: 5 or 6 under
+    ``--no-surfatyp-all-parts``; 6 on an implicit deck, with no such
+    ``*SET_PART`` or with one that exempts every part; 7 always."""
+    off = not state.options.surfatyp_all_parts
+    if c.sstyp == 5:
+        return (
+            f"SURFATYP 5 means 'include all non-spot-weld parts (the SURFA "
+            f"field is ignored)' (Vol I R17 p.11-25), but SSID = {c.ssid} is "
+            "stated and under --no-surfatyp-all-parts k2rad builds the "
+            "all-parts self-contact from SSID = 0 only",
+            "REMEDY: set SSID to 0 for the all-parts self-contact "
+            "(/INTER/TYPE25 on an explicit deck, the node→surface "
+            "/INTER/TYPE7 on an implicit one), name a part set (SURFATYP 2) "
+            "or a part (3) for the /INTER/TYPE7 self-contact of that set, or "
+            "drop --no-surfatyp-all-parts: without it the card takes the "
+            "SSID = 0 route.")
+    if c.sstyp == 6:
+        why = (f"SURFATYP 6 makes SSID = {c.ssid} the *SET_PART of EXEMPTED "
+               f"parts - '{_STYP567_MEANING[6]}' (Vol I R17 p.11-25) - ")
+        if off:
+            why += ("and under --no-surfatyp-all-parts k2rad builds no "
+                    "all-parts-minus-a-set contact")
+        elif c.ssid not in state.part_sets:
+            why += f"but no *SET_PART {c.ssid} exists in this deck"
+        elif state.is_implicit:
+            why += ("and k2rad routes SURFATYP 6 on an EXPLICIT deck only (an "
+                    "/INTER/TYPE25 over every part minus the set); the "
+                    "implicit all-parts /INTER/TYPE7 recipe minus a set has "
+                    "no probe")
+        else:
+            why += f"and *SET_PART {c.ssid} exempts every part of the deck"
+        if c.ssid not in state.part_sets and not off:
+            return (why,
+                    f"REMEDY: add the *SET_PART {c.ssid} of the exempted "
+                    "parts, or name the parts the contact should hold in a "
+                    "*SET_PART and state SURFATYP 2.")
+        return (why,
+                f"REMEDY: invert *SET_PART {c.ssid} by hand into a *SET_PART "
+                "of the parts the contact should hold and state SURFATYP 2 - "
+                "the /INTER/TYPE7 self-contact of that set (MEASURED on the "
+                "three-card explicit coupon: the included card engages at "
+                "0.3501 mm, the left-out one passes through)"
+                + (", or drop --no-surfatyp-all-parts." if off
+                   and not state.is_implicit else "."))
+    return (f"SURFATYP 7 makes SSID = {c.ssid} a *SET_PART_TREE branch id "
+            "(Vol I R17 p.11-25), and k2rad has no *SET_PART_TREE reader",
+            "REMEDY: list the branch's parts in a *SET_PART and state "
+            "SURFATYP 2 (the /INTER/TYPE7 self-contact of that set).")
+
+
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                      report_gapmin: bool = True) -> List[str]:
     # report_gapmin=False only from _make_deferred_implicit_stub (round 8,
@@ -2444,6 +2594,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
         # (CardStack K-05: the report names that route's own gap rule).
         if report_gapmin:
             _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
+        _warn_slsfac_dropped(state)                      # round 10, A9
         return []
     lines = ["#-  INTERFACES:", HDR]
 
@@ -2498,7 +2649,10 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
     all_pids: List[int] = sorted(state.parts.keys())
 
     for c in state.contacts_single:
-        if c.ssid == 0:
+        # round 10, B2: SSID = 0, or SURFATYP 5 / 6 with a stated SSID - the
+        # ONE predicate (writer/common.single_surface_scope)
+        scope = single_surface_scope(state, c)
+        if scope is not None:
             # The two halves of this guard belong to DIFFERENT branches, and
             # fusing them dropped a load path. `not all_pids` means there is no
             # surface to build at all and is fatal either way. `not
@@ -2545,16 +2699,20 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 # implicit (validated recipe); a part or part set in SSID is the
                 # TYPE7 self-contact of that set on BOTH decks (the else branch).
                 kw = c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE"
-                state.warn(
-                    f"*{kw} {c.inter_id}: SSID = 0 on an explicit analysis → "
-                    f"/INTER/TYPE25/{c.inter_id} all-parts self-contact (one "
-                    "/SURF/PART/EXT over every part, surf_ID2 = 0: each node "
-                    "against every segment of the same surface, as the native "
-                    "OpenRadioss reader writes it). A part or part set in SSID "
-                    "(SSID != 0) gives the /INTER/TYPE7 self-contact of that "
-                    "set instead, on explicit and implicit decks alike; an "
-                    "SSID = 0 card on an implicit deck takes the all-parts "
-                    "node→surface /INTER/TYPE7 recipe.")
+                if c.ssid == 0:
+                    state.warn(
+                        f"*{kw} {c.inter_id}: SSID = 0 on an explicit analysis "
+                        f"→ /INTER/TYPE25/{c.inter_id} all-parts self-contact "
+                        "(one /SURF/PART/EXT over every part, surf_ID2 = 0: "
+                        "each node against every segment of the same "
+                        "surface, as the native OpenRadioss reader writes "
+                        "it). A part or part set in SSID (SSID != 0) gives "
+                        "the /INTER/TYPE7 self-contact of that set instead, "
+                        "on explicit and implicit decks alike; an SSID = 0 "
+                        "card on an implicit deck takes the all-parts "
+                        "node→surface /INTER/TYPE7 recipe.")
+                else:
+                    _warn_surfatyp_route(state, c, kw, scope, all_pids)
                 _warn_type25_self_gap_inputs(state, c, kw)
                 _warn_soft_card_fields(state, c, kw, "TYPE25")   # K-09
                 # A converted *CONSTRAINED_JOINT_SCREW (round 7, B2) takes its
@@ -2564,12 +2722,14 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 # main node a Lagrange condition holds is cancelled on the
                 # main node alone (RBYVIT, resol.F:7572, runs before LAG_MULT,
                 # :7901), so the A-B pair slips the mesh off its main node.
+                # (A SURFATYP 6 card that leaves A or B out holds no such
+                # pair: joint_screw._contact_conflict registers no split.)
                 splits = lagrange_held_pairs(state, c.inter_id)
                 a_parts = {p.a_pid for p in splits}
                 self_surf = state.next_id()
                 lines += _emit_surf_part(
                     self_surf, f"contact_{c.inter_id}_self",
-                    [p for p in all_pids if p not in a_parts])
+                    [p for p in scope if p not in a_parts])
                 fric, fric_id = _contact_friction(
                     state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE25")
                 # never Inacti 6 here (CardStack K-06): a TYPE25 refuses it
@@ -2578,21 +2738,23 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 stfac = _stfac_for(state, c.sfs, c.inter_id, "TYPE25") or 1.0
                 # CardStack K-10 (opt-in --general-shell-edges): Iedge 1 on
                 # an ordinary AUTOMATIC_GENERAL; the split copies it below
-                iedge = _general_shell_edges_iedge(state, c, kw, all_pids)
+                iedge = _general_shell_edges_iedge(state, c, kw, scope)
                 # CardStack K-11: Card-2 BT / DT -> Tstart / Tstop (the split
                 # copies them); VDC is named, not written (VISs 0.05)
                 tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt,
                                              kw, "TYPE25")
                 _warn_type25_self_vdc(state, c, kw)
                 # CardStack K-16: Card E SRNDE 1 -> Ishape 2 (the split too)
-                ishape = _type25_ishape(state, c, kw, c.inter_id, all_pids)
+                ishape = _type25_ishape(state, c, kw, c.inter_id, scope)
+                # round 10, B6 (the split inherits the parent's line)
+                _warn_type25_no_contact_stiffness(state, c.inter_id, scope)
                 lines += _emit_inter_type25_self(
                     c.inter_id, c.title, self_surf, fric, inacti, stfac,
                     fric_id=fric_id, iedge=iedge, tstart=tstart, tstop=tstop,
                     ishape=ishape)
                 for plan in splits:
                     tag = plan.tag
-                    rest = [p for p in all_pids
+                    rest = [p for p in scope
                             if p not in (plan.a_pid, plan.b_pid)]
                     s_rest = state.next_id()
                     s_a = state.next_id()
@@ -2690,29 +2852,25 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                  if e.pid not in _rigid_parts},
                 stfac, 4, c.title)
             kw = c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE"
+            if c.ssid != 0:
+                _warn_surfatyp_route(state, c, kw, scope, all_pids)  # B2
             _warn_soft_card_fields(state, c, kw, "TYPE7")       # K-09
             _warn_general_shell_edges_unreached(                 # K-10
                 state, c, kw, "the implicit all-parts /INTER/TYPE7 "
                 "node-to-surface recipe")
             _warn_card_e_type7(state, c, kw, viss)               # K-16
-        elif c.sstyp == 5:
+        elif c.sstyp in (5, 6, 7):
             # SURFATYP 5 = "include all non-spot-weld parts (the SURFA field
-            # is ignored)", Vol I R17 p.11-25. k2rad routes the all-parts
-            # self-contact from SSID = 0 only, so a stated SSID with type 5
-            # is dropped - before the resolvers run (they would find no
-            # nodes for type 5 anyway and draw no id) - and named
-            # (CardStack K-01).
-            _drop_interface(
-                state, dropped, c.keyword, c.inter_id,
-                f"SURFATYP 5 means 'include all non-spot-weld parts (the "
-                f"SURFA field is ignored)' (Vol I R17 p.11-25), but SSID = "
-                f"{c.ssid} is stated and k2rad builds the all-parts "
-                "self-contact from SSID = 0 only",
-                "REMEDY: set SSID to 0 for the all-parts self-contact "
-                "(/INTER/TYPE25 on an explicit deck, the node→surface "
-                "/INTER/TYPE7 on an implicit one), or name a part set "
-                "(SURFATYP 2) or a part (3) for the /INTER/TYPE7 "
-                "self-contact of that set.")
+            # is ignored)", 6 = "part set ID for exempted parts", 7 = a
+            # *SET_PART_TREE branch id, Vol I R17 p.11-25. 5 / 6 reach here
+            # only under --no-surfatyp-all-parts, a 6 also on an implicit
+            # deck (or with no such set, or one that exempts every part), 7
+            # always (no *SET_PART_TREE reader): dropped before the
+            # resolvers run (they would find no nodes and draw no id) and
+            # named by the type (CardStack K-01; round 10, B2).
+            cause, remedy = _surfatyp_drop(state, c)
+            _drop_interface(state, dropped, c.keyword, c.inter_id, cause,
+                            remedy)
             continue
         else:
             diag: Dict[str, int] = {}
@@ -2801,6 +2959,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
     # takes the record. A no-op for every other spelling, which has no
     # such note.
     from ..handlers import _withdraw_contact_spelling
+    capped: List[int] = []           # round 10, A8: the capped TYPE7 ids
     for c in state.contacts_surf2surf:
         diag = {}
         # CardStack K-08B (opt-in): the two-surface /INTER/TYPE25 route
@@ -2930,6 +3089,12 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
         tstart, tstop = _birth_death(                           # K-11
             state, c.inter_id, c.bt, c.dt,
             c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE", "TYPE7")
+        main_pids = _contact_master_pids(state, main_sid, main_styp)
+        sec_pids = _secondary_pids(state, sec_sid, sec_styp, rigid_nodes,
+                                   keep_rigid)
+        # R14 round 10, A8: the rigid-tool penalty cap (decided on the
+        # EMITTED sides, before the card is written)
+        cap, cap_why = _rigid_tool_cap(state, c, plan, main_pids, sec_pids)
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
                                    viss=viss,
@@ -2938,11 +3103,20 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                    thermal=_contact_thermal_cells(
                                        state, c.keyword, c.inter_id, c.thermal,
                                        "TYPE7"),
-                                   tstart=tstart, tstop=tstop)
-        _warn_stmin_floor(
-            state, c.inter_id, _contact_master_pids(state, main_sid, main_styp),
-            _secondary_pids(state, sec_sid, sec_styp, rigid_nodes, keep_rigid),
-            stfac, 4, c.title)
+                                   tstart=tstart, tstop=tstop,
+                                   stmax=cap.stmax if cap else 0.0,
+                                   stmin_cap=cap.stmin if cap else None)
+        if cap is not None:
+            capped.append(c.inter_id)
+            _warn_tool_cap(state, c, cap, sec_pids)
+        elif cap_why:
+            state.warn(
+                f"*{c.keyword} {c.inter_id}: the rigid-tool penalty cap "
+                f"(round 10, A8) is not written - {cap_why}; "
+                f"/INTER/TYPE7/{c.inter_id} keeps Stmax 0 and Stmin "
+                f"{state.type7_written_stmin.get(c.inter_id, _TYPE7_STMIN):g}.")
+        _warn_stmin_floor(state, c.inter_id, main_pids, sec_pids, stfac, 4,
+                          c.title)
         _warn_soft_card_fields(                                  # K-09
             state, c, c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
             "TYPE7")
@@ -2954,7 +3128,68 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
         _report_unconsumed_gapmin(state, gapmin_overrides)
 
     _note_dropped_interfaces(state, dropped)
+    if capped:                                           # round 10, A8
+        _warn_tool_cap_deck(state)
+    _warn_slsfac_dropped(state, capped)                  # round 10, A9
     return lines
+
+
+def _deck_has_contact_record(state: ConversionState) -> bool:
+    """True when the deck carries a contact k2rad converts in any
+    container (round 10, A9: the SLSFAC sentence is about those)."""
+    return bool(state.contacts_single or state.contacts_surf2surf
+                or state.contacts_general or state.contacts_type25
+                or state.contacts_tied or state.contacts_spotweld
+                or state.contacts_tiebreak or state.force_transducers)
+
+
+def _warn_slsfac_dropped(state: ConversionState,
+                         capped_ids: Iterable[int] = ()) -> None:
+    """R14 round 10, A9: ONE sentence per deck when ``*CONTROL_CONTACT``
+    SLSFAC is not LS-DYNA's default (0 = 0.1, Vol I R17 p.12-69) on a deck
+    with a contact: the reader stores it (``handlers.handle_control_contact``)
+    and no ``/INTER`` cell carries it - except the rigid-tool penalty cap
+    (A8), whose capped interfaces *capped_ids* the sentence names. Called
+    from both exits of :func:`_make_interfaces` (five of the eight R14
+    carriers reach only the early one); the state flag keeps it once when a
+    deferred implicit stub calls that section a second time. Text only."""
+    cc = state.ctrl_contact
+    if cc is None or state.slsfac_named or not _deck_has_contact_record(state):
+        return
+    v = cc.slsfac
+    if v == 0.0 or abs(v - 0.1) <= 1e-12 * 0.1:
+        return
+    state.slsfac_named = True
+    neg = " - a negative value LS-DYNA does not define" if v < 0.0 else ""
+    ids = sorted(capped_ids)
+    # R14 round 10, fix round (findings 6.24 (1)(b)): SLSFAC >= 1 also sets
+    # LS-DYNA's default TSSFAC (Remark 1 a); that sentence is its own (the
+    # engine time step's), this one only points at it
+    from .assembly import ls_tssfac_unconverted
+    hit = ls_tssfac_unconverted(state)
+    ts_ref = (" SLSFAC also sets LS-DYNA's default time-step scale factor "
+              f"on this deck ({hit[0]:g}): see the *CONTROL_CONTACT "
+              "time-step sentence." if hit is not None
+              and hit[1].startswith("*CONTROL_CONTACT") else "")
+    head = (f"*CONTROL_CONTACT SLSFAC = {v:g}{neg} (Vol I R17 p.12-69: the "
+            "scale factor of every sliding-interface penalty; 0 = LS-DYNA's "
+            "default 0.1): ")
+    rest = ("the OpenRadioss stiffness is the starter's own formula times "
+            "Stfac (from each card's SFS), not LS-DYNA's SLSFAC x SF x K A / "
+            "max shell diagonal (Theory R16 eq. 30.7 / 30.8).")
+    if ids:
+        state.warn(
+            head + "the reader stores it and only the rigid-tool penalty cap "
+            "(round 10, A8) carries it - Stmax = 2 x LS-DYNA Theory eq. 30.8 "
+            "x SLSFAC x SF on /INTER/TYPE7 "
+            f"{' / '.join(str(i) for i in ids)} (see each interface's "
+            "note); on every other contact of this deck " + rest + ts_ref)
+        return
+    state.warn(
+        head + "no /INTER cell k2rad writes carries it - the reader stores it "
+        "and reads back only SHLTHK - so on this deck's contacts " + rest
+        + " The rigid-tool penalty cap (round 10, A8) reaches no interface "
+        "of this deck." + ts_ref)
 
 
 def _report_unconsumed_gapmin(state: ConversionState,
@@ -3065,8 +3300,10 @@ def _select_parent_interface(state: ConversionState) -> Optional[int]:
     def live(c) -> bool:
         return c.inter_id not in state.dropped_inter_ids
 
+    every_part = sorted(state.parts)
     for c in state.contacts_single:
-        if c.ssid == 0 and live(c):
+        # SSID = 0, or SURFATYP 5 (round 10, B2): every part
+        if live(c) and single_surface_scope(state, c) == every_part:
             return c.inter_id
     for c in state.contacts_single:
         if live(c):
@@ -3902,7 +4139,8 @@ def _written_interface_types(state: ConversionState) -> Dict[int, str]:
     of :func:`_report_contact_lever_reach`."""
     kinds: Dict[int, str] = {}
     for c in state.contacts_single:
-        kinds[c.inter_id] = ("/INTER/TYPE25" if c.ssid == 0
+        kinds[c.inter_id] = ("/INTER/TYPE25"
+                             if single_surface_scope(state, c) is not None
                              and not state.is_implicit else "/INTER/TYPE7")
     for c in state.contacts_surf2surf:
         kinds[c.inter_id] = ("/INTER/TYPE25" if c.inter_id
@@ -3929,8 +4167,9 @@ def _report_contact_lever_reach(state: ConversionState) -> None:
     """Say, once per deck and after the LAST contact section, what the
     per-interface contact levers reached (CardStack K-02 / K-06 and the
     K-0P review of --soften-stfac): the --soften-stfac interfaces by type
-    (and the tiebreak companions it leaves at Stfac 0), and every
-    --inter-stmin / --inter-inacti id no interface took."""
+    (the tiebreak companions among the TYPE25 since round 10, B3; under
+    --no-tiebreak-companion-stfac the companions it leaves at Stfac 0), and
+    every --inter-stmin / --inter-inacti id no interface took."""
     kinds: Optional[Dict[int, str]] = None
     stmin_left = sorted(i for i in state.options.inter_stmin
                         if i not in state.inter_stmin_reached)
@@ -3981,7 +4220,8 @@ def _report_contact_lever_reach(state: ConversionState) -> None:
     comp = sorted(set(state.soften_stfac_unreached))
     tail = (" It does not reach the post-rupture companion /INTER/TYPE25 "
             + ", ".join(map(str, comp)) + " of a *CONTACT_..._TIEBREAK, which "
-            "keeps Stfac 0 (the engine default)." if comp else "")
+            "keeps Stfac 0 (the starter's 1.0) under "
+            "--no-tiebreak-companion-stfac." if comp else "")
     if not parts:
         state.warn(
             f"--soften-stfac: Stfac={soft:g} reached no interface: this deck "
@@ -4327,7 +4567,8 @@ def _pids_shell_solid(state: ConversionState,
 
 def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
                                sst: float, mst: float, pids: Iterable[int],
-                               target: str = "TYPE7") -> float:
+                               target: str = "TYPE7",
+                               igap2: bool = False) -> float:
     """CardStack K-12 (default ON, ``--no-single-surface-sst-gap``): the
     Gapmin of a SINGLE-surface contact on an Igap-0 route from Card-3 SST.
 
@@ -4342,7 +4583,14 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
     the rule is refused by name (the old value kept). No SST, no shell, or
     the flag off: :func:`_sst_mst_to_gapmin`, today's value and text - and
     with the flag on, SST 0 and an MST on a set with a shell, MST is named as
-    unused while the old value stands (the fix round of the K-12 review)."""
+    unused while the old value stands (the fix round of the K-12 review).
+
+    *igap2* (round 10, B1): the self-mirrored SOFT -7 card, an /INTER/TYPE7
+    with Igap 2 whose gap is max(Gapmin, t_s/2 + t_m/2) from the elements
+    (``i7cor3.F:98-121``), takes the same |SST|, and its sentence says that
+    |SST| acts only where it exceeds t; ``--inter-gapmin`` does not reach
+    that route (CardStack K-05), so no sentence offers it there."""
+    lever = target == "TYPE7" and not igap2
     if not state.options.single_surface_sst_gap:
         return _sst_mst_to_gapmin(sst, mst, state, inter_id, target)
     if sst == 0.0:
@@ -4356,7 +4604,7 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
                 f"/INTER/{target} keeps the old (|SST| + |MST|)/2 = {gap:g}, "
                 "from MST alone"
                 + (f"; --inter-gapmin {inter_id}=VAL sets another value."
-                   if target == "TYPE7" else "."))
+                   if lever else "."))
         return gap
     has_shell, has_solid = _pids_shell_solid(state, pids)
     if not has_shell:
@@ -4372,7 +4620,7 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
             "hold both - the |SST| rule (CardStack K-12) is refused here and "
             f"/INTER/{target} keeps Gapmin (|SST| + |MST|)/2 = {old:g}"
             + (f"; --inter-gapmin {inter_id}=VAL sets another value."
-               if target == "TYPE7" else "."))
+               if lever else "."))
         return gap
     if sst < 0.0:
         state.warn(
@@ -4389,6 +4637,13 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
         f"the old two-surface (|SST| + |MST|)/2 = {old:g}."
         + (f" MST {mst:g} is not used: a single-surface contact has no SURFB "
            "(SBST is the SURFB thickness, p.11-33)." if mst else "")
+        + (" SOFT -7 writes Igap 2, whose gap is max(Gapmin, t_s/2 + t_m/2) "
+           "from the elements (i7cor3.F:98-121), so |SST| sets the "
+           "engagement where it exceeds the shell thickness (MEASURED on two "
+           "t 0.35 cards with SST 0.5, nt 4: engaged at 0.3501 mm with the "
+           "old Gapmin 0.25, at 0.5005 mm with Gapmin 0.5; LS-DYNA's 0.5) "
+           "and the element thickness sets it below (round 10)."
+           if igap2 else "")
         + " On an implicit deck, keep ignore=0 to retain Inacti=0 if Gapmin "
         "exceeds the physical clearance (pre-engagement bootstrap) — "
         "ignore=1/2 (and any explicit deck) maps to Inacti=5, which shrinks "
@@ -4461,9 +4716,14 @@ class _PartStiffness(NamedTuple):
     n_sec: int         # nodes the median is taken over
     e: float           # Young's modulus (the starter's PM(20))
     t: float           # shell: median element thickness
-    b: float           # solid: bulk modulus E / (3 (1 - 2 nu))
+    b: float           # solid: the bulk modulus the starter reads, PM(32)
     a2v: float         # solid: median A^2 / V of the part's boundary faces
     l13: float         # solid: median (2 V_node)^(1/3) of its surface nodes
+    # round 10, B4: how B, the tet volume and a TET10 nodal volume were
+    # taken ("" = E / (3 (1 - 2 nu)), the true volume, V / nodes)
+    bnote: str = ""
+    tet: bool = False      # A^2 / V over the starter's 1.5 x tet volume
+    tet10_nodes: bool = False  # the TET10 corner / midside split of V/4
 
 
 def _combine_istf(km: float, ks: float, istf: int) -> float:
@@ -4679,7 +4939,11 @@ def _part_stiffness_quick(state: ConversionState,
                           e, _unique_node_slots(e.nodes), t1) or t1) > 0.0]
                 cache[pid] = e_mod * _median(ts) if ts else None
                 continue
-            if not solids[pid] or not 0.0 <= nu < 0.5:
+            if not solids[pid]:
+                continue
+            # round 10, B4: the law's PM(32), as the exact walk reads it
+            bq = _part_bulk(state, pid, e_mod, nu)
+            if bq is None:
                 continue
             lst = solids[pid]
             hs: List[float] = []
@@ -4695,8 +4959,54 @@ def _part_stiffness_quick(state: ConversionState,
                 if vol > 0.0:
                     hs.append(vol ** (1.0 / 3.0))
             if hs:
-                cache[pid] = e_mod / (3.0 * (1.0 - 2.0 * nu)) * _median(hs)
+                cache[pid] = bq[0] * _median(hs)
     return {p: cache.get(p) for p in pids}
+
+
+def _part_bulk(state: ConversionState, pid: int, e_mod: float,
+               nu: float) -> Optional[Tuple[float, str]]:
+    """Round 10, B4: ``(B, note)`` - the bulk modulus a solid part's contact
+    stiffness reads in the starter, PM(32) = PARMAT(1) of the EMITTED law
+    (``hm_read_mat.F90:1451-1464``; ``i7sti3.F:444`` and the secondary
+    node's ``sbulk3.F:99``), or None (no estimate). *note* names a law whose
+    B is not the isotropic E / (3 (1 - 2 nu)) ("" otherwise):
+
+    * /MAT/LAW38 (``*MAT_LOW_DENSITY_FOAM``): B = E (``hm_read_mat38.F:
+      347-348``); the record keeps no nu, so the isotropic formula gave E / 3
+      (MEASURED: the Stmin bracket [180, 220) holds the starter's 200 on a
+      100-modulus foam, against the old estimate's 66.67);
+    * /MAT/LAW50 (``*MAT_CRUSHABLE_FOAM``, ``*MAT_MODIFIED_HONEYCOMB``): B
+      = the largest of the six written moduli E11 E22 E33 G12 G23 G31
+      (``hm_read_mat50.F90:405`` / ``:416``) - E and E / (2 (1 + nu)) for
+      the crushable foam, the resolved uncompressed moduli for the
+      honeycomb;
+    * /MAT/LAW28 (``*MAT_HONEYCOMB``): B = the largest of the written
+      uncompressed moduli EAAU .. GCAU (``hm_read_mat28.F:185``);
+    * every other law, /MAT/LAW90 included (``hm_read_mat90.F:200-201`` C1
+      = E / 3 / (1 - 2 Nu) with the Nu 0 k2rad writes = the formula): E /
+      (3 (1 - 2 nu)) for 0 <= nu < 0.5, else None."""
+    from ..state import (MatCrushableFoam, MatHoneycomb, MatLowDensityFoam,
+                         MatModifiedHoneycomb)
+    mat = _part_material(state, pid)
+    if isinstance(mat, MatLowDensityFoam):
+        return e_mod, "B = E for /MAT/LAW38 (hm_read_mat38.F:347-348)"
+    if isinstance(mat, MatCrushableFoam):
+        g = (e_mod / (2.0 * (1.0 + mat.nu)) if mat.nu > -1.0
+             else e_mod / 2.0)
+        return (max(e_mod, g), "B = the largest /MAT/LAW50 modulus "
+                "(hm_read_mat50.F90:405/416)")
+    if isinstance(mat, MatModifiedHoneycomb):
+        mods = [float(m) for m in (getattr(mat, "moduli", None) or ())]
+        b = max(mods) if mods else 0.0
+        return ((b, "B = the largest /MAT/LAW50 modulus "
+                 "(hm_read_mat50.F90:405/416)") if b > 0.0 else None)
+    if isinstance(mat, MatHoneycomb):
+        b = max(mat.eaau, mat.ebbu, mat.eccu, mat.gabu, mat.gbcu, mat.gcau)
+        return ((b, "B = the largest uncompressed /MAT/LAW28 modulus "
+                 "(hm_read_mat28.F:185)") if b > 0.0 else None)
+    if not 0.0 <= nu < 0.5:
+        return None
+    return e_mod / (3.0 * (1.0 - 2.0 * nu)), ""
 
 
 def _part_stiffness(state: ConversionState,
@@ -4709,9 +5019,12 @@ def _part_stiffness(state: ConversionState,
     (``asstifi.F:52``, the mean over the node's shells), t the element
     thickness the /SHELL row carries. Solid part: main face
     ``Stfac x B x A^2 / V`` (``i7sti3.F:444``; a /TETRA10 face is its 4
-    sub-triangles), secondary node ``B x (2 V_node)^(1/3)``
-    (``asstifi.F:50``, V_node = the element volumes over their node counts,
-    ``sbulk3.F``). Each a median over the part's elements / surface nodes."""
+    sub-triangles; a tet's V the starter's 1.5 x its volume), secondary node
+    ``B x (2 V_node)^(1/3)`` (``asstifi.F:50``, V_node = the element
+    volumes over their node counts, ``sbulk3.F``; a /TETRA10's corner and
+    midside shares of V/4), B the emitted law's PM(32)
+    (:func:`_part_bulk`) - the three since round 10, B4. Each a median over
+    the part's elements / surface nodes."""
     pids = list(pids)
     cache = state.stmin_part_estimates
     want = [p for p in set(pids) if p not in cache]
@@ -4750,32 +5063,43 @@ def _part_stiffness(state: ConversionState,
                                         len(ts), len(ts), e_mod, t, 0.0, 0.0,
                                         0.0)
             continue
-        if not solids[pid] or not 0.0 <= nu < 0.5:
+        if not solids[pid]:
             continue
-        bulk = e_mod / (3.0 * (1.0 - 2.0 * nu))
+        # round 10, B4: B is the bulk modulus the starter reads, PM(32) =
+        # PARMAT(1) of the EMITTED law (hm_read_mat.F90:1451-1464)
+        bb = _part_bulk(state, pid, e_mod, nu)
+        if bb is None:
+            continue
+        bulk, bnote = bb
         # each element by its DISTINCT corners: a 4-node card, a TET10 (its
         # first 4) or a collapsed 8-node card with 4 distinct nodes is a tet
         # (the writer's /TETRA4), 8 distinct nodes a hex; pentahedra and
-        # pyramids are left out of the estimate
-        elems: List[Tuple[List[int], Tuple[Tuple[int, ...], ...], int]] = []
+        # pyramids are left out of the estimate. The 4th item is a TET10's
+        # six midside nodes (round 10, B4: they are secondary nodes too)
+        elems: List[Tuple[List[int], Tuple[Tuple[int, ...], ...], int,
+                          List[int]]] = []
         tet10 = True
+        any_tet = False
         for se in solids[pid]:
             nds = list(se.nodes)
             n_uniq = len(set(nds))
             if len(nds) == 10:
-                elems.append((nds[:4], _TET4_FACE_IDX, n_uniq))
+                elems.append((nds[:4], _TET4_FACE_IDX, n_uniq, nds[4:]))
+                any_tet = True
             elif n_uniq == 4:
                 elems.append((nds if len(nds) == 4 else
-                              _ordered_unique_nodes(nds), _TET4_FACE_IDX, 4))
+                              _ordered_unique_nodes(nds), _TET4_FACE_IDX, 4,
+                              []))
                 tet10 = False
+                any_tet = True
             elif len(nds) == 8 and n_uniq == 8:
-                elems.append((nds, _HEX_FACE_IDX, 8))
+                elems.append((nds, _HEX_FACE_IDX, 8, []))
                 tet10 = False
         # pass 1: the boundary faces (used by ONE element of the part) - only
         # keys here, so a large part pays for areas and volumes on its skin
         owner: Dict[Tuple[int, ...], Tuple[int, int]] = {}
         shared: Set[Tuple[int, ...]] = set()
-        for k, (corners, idx, _nu) in enumerate(elems):
+        for k, (corners, idx, _nu, _mids) in enumerate(elems):
             for fi, f in enumerate(idx):
                 key = tuple(sorted([corners[i] for i in f]))
                 if key in owner:
@@ -4796,23 +5120,44 @@ def _part_stiffness(state: ConversionState,
         for key, (k, fi) in owner.items():
             if key in shared:
                 continue
-            corners, idx, _nu = elems[k]
-            xyz = _node_xyz(nodes, [corners[i] for i in idx[fi]])
+            corners, idx, _nu, mids = elems[k]
+            face = [corners[i] for i in idx[fi]]
+            xyz = _node_xyz(nodes, face)
             vol = _vol(k)
             if not vol > 0.0 or xyz is None:
                 continue
+            # round 10, B4: the starter stores a tet as the degenerate brick
+            # (n1, n1, n2, n2, n4, n3, n3, n4) (hm_read_solid.F:278-284
+            # /TETRA4, :386-392 /TETRA10) and i7sti3.F:426-444 takes its
+            # one-point VOLINT volume, 1.5 x the tet's (MEASURED: Stmin
+            # brackets [10.3, 10.5) on /TETRA10, [160, 173) on /TETRA4)
+            vs = 1.5 * vol if idx is _TET4_FACE_IDX else vol
             area = _face_area(xyz)
             if area > 0.0:
-                a2v.append((area / sub) ** 2 / vol)
+                a2v.append((area / sub) ** 2 / vs)
                 surface.update(key)
-        # pass 2: the nodal volume (sbulk3.F: V / nodes per element) of the
-        # surface nodes, from every element that touches one
+                if mids:                       # the face's edge midsides
+                    i, j, m = idx[fi]
+                    for a, b in ((i, j), (j, m), (i, m)):
+                        surface.add(mids[TET10_EDGEMID[frozenset((a, b))]
+                                         - 4])
+        # pass 2: the nodal volume of the surface nodes, from every element
+        # that touches one: V / its nodes (sbulk3.F:93-104), but a /TETRA10
+        # splits VOLU = V/4 - the LAST of its 4 integration points' volumes
+        # (s10init3.F:233 inside the loop :225-240, read at :347) - as
+        # VOLU / 32 per corner and 7 VOLU / 48 per midside node
+        # (sbulk3.F:152-181, FAC = 3/14) (round 10, B4; MEASURED: the Stmin
+        # bracket [28.5, 29.5) holds the 28.89 of the softest corner node)
         vnode: Dict[int, float] = {}
-        for k, (corners, _idx, n_uniq) in enumerate(elems):
-            hit = [n for n in corners if n in surface]
-            if hit:
-                share = _vol(k) / n_uniq
-                for n in hit:
+        for k, (corners, _idx, n_uniq, mids) in enumerate(elems):
+            if mids:
+                volu = _vol(k) / 4.0
+                pairs = ([(n, volu / 32.0) for n in corners]
+                         + [(n, 7.0 * volu / 48.0) for n in mids])
+            else:
+                pairs = [(n, _vol(k) / n_uniq) for n in corners]
+            for n, share in pairs:
+                if n in surface:
                     vnode[n] = vnode.get(n, 0.0) + share
         l13 = [(2.0 * vnode[nid]) ** (1.0 / 3.0) for nid in surface
                if vnode.get(nid, 0.0) > 0.0]
@@ -4820,7 +5165,9 @@ def _part_stiffness(state: ConversionState,
             continue
         ma, ml = _median(a2v), _median(l13)
         cache[pid] = _PartStiffness("solid", bulk * ma, bulk * ml, len(a2v),
-                                    len(l13), e_mod, 0.0, bulk, ma, ml)
+                                    len(l13), e_mod, 0.0, bulk, ma, ml,
+                                    bnote, any_tet,
+                                    any(m for _c, _i, _n, m in elems))
     return {p: cache.get(p) for p in pids}
 
 
@@ -4848,13 +5195,24 @@ def _side_formula(est: List[_PartStiffness], main: bool,
         if x.kind == "shell":
             return k, (f"{lab} = {pre}E x t = {num}{g(x.e):g} x {g(x.t):g} = "
                        f"{g(k):g}"), src
+        # round 10, B4: the law's B, the tet's 1.5 V, the TET10 node split
+        bn = f"; {x.bnote}" if x.bnote else ""
         if main:
-            return k, (f"{lab} = Stfac x B x A^2/V = {num}{g(x.b):g} x "
+            vtxt = "A^2/(1.5 V)" if x.tet else "A^2/V"
+            tn = ("; V = the tet volume - the starter stores a tet as a "
+                  "degenerate brick (hm_read_solid.F:278-284 / :386-392) "
+                  "whose one-point volume is 1.5 V (i7sti3.F:426-444)"
+                  if x.tet else "")
+            return k, (f"{lab} = Stfac x B x {vtxt} = {num}{g(x.b):g} x "
                        f"{g(x.a2v):g} = {g(k):g} (the median of "
-                       f"{x.n_main} main faces)"), src
+                       f"{x.n_main} main faces{bn}{tn})"), src
+        tn = ("; a /TETRA10 gives V_node = VOLU/32 at a corner and 7 VOLU/48 "
+              "at a midside node, VOLU = V/4, its last integration point's "
+              "volume (s10init3.F:233, :347; sbulk3.F:152-181)"
+              if x.tet10_nodes else "")
         return k, (f"{lab} = B x (2 V_node)^(1/3) = {g(x.b):g} x "
                    f"{g(x.l13):g} = {g(k):g} (the median of {x.n_sec} "
-                   "surface nodes)"), src
+                   f"surface nodes{bn}{tn})"), src
     n = sum(x.n_main if main else x.n_sec for x in est)
     what = "main segments" if main else "secondary nodes"
     return k, (f"{lab} = {'Stfac x ' if main else ''}the median {what} "
@@ -4944,6 +5302,44 @@ def _warn_no_contact_stiffness(state: ConversionState, inter_id: int,
            "usual." if rest else ".") + measured)
 
 
+def _warn_type25_no_contact_stiffness(state: ConversionState, inter_id: int,
+                                      pids: Iterable[int]) -> None:
+    """Round 10, B6: the TYPE25 twin of :func:`_warn_no_contact_stiffness`
+    (which reaches the /INTER/TYPE7 routes through the K-02 floor check):
+    name the parts of /INTER/TYPE25 *inter_id* - the SSID = 0 / SURFATYP 5
+    / 6 self-contact, the eroding / node-to-surface family, ``--s2s-type25``
+    - whose law the starter gives no contact stiffness
+    (:data:`_NO_CONTACT_STIFFNESS_LAWS`). Text only; no byte moves."""
+    by_law: Dict[Tuple[str, str, str], List[int]] = {}
+    for pid in sorted(set(pids)):
+        law = _part_no_contact_stiffness(state, pid)
+        if law is not None:
+            by_law.setdefault(law, []).append(pid)
+    if not by_law:
+        return
+    names = "; ".join(
+        f"part{'s' if len(p) > 1 else ''} {', '.join(str(x) for x in p)} "
+        f"({law[0]}, {law[1]})" for law, p in by_law.items())
+    readers = "; ".join(f"{law[0]}'s reader leaves PARMAT(1) unset "
+                        f"({law[2]})" for law in by_law)
+    measured = (" MEASURED (two t 0.35 shell cards thrown at 1000 mm/s onto a "
+                "2 x 2 x 1 hex block in an SSID = 0 TYPE25, nt 4): with the "
+                "block /MAT/LAW169 the cards keep their translational kinetic "
+                "energy (0.04725 at t 0, 0.2, 0.4, 0.6, 0.8 and 1 ms: a 0.00 % "
+                "drop), against a 50.33 % drop with *MAT_ELASTIC E 10."
+                if any(law[0] == "/MAT/LAW169" for law in by_law) else "")
+    state.warn(
+        f"/INTER/TYPE25 {inter_id}: {names} - a law that gives the starter "
+        f"no contact stiffness: {readers}, so its bulk modulus PM(32) = 0 "
+        "and PM(107) = 0 (hm_read_mat.F90:1451/1464/1506/1546, "
+        "updmat.F:418). A segment of such a part gets STF = 0 on either "
+        "Icontrol branch (i25sti3.F:884-889) and its nodes a secondary "
+        "stiffness of 0 (sbulk3.F:99, asstifi.F:50, i25stslav.F:63-64), and "
+        "the engine search skips both (i25trivox.F:276/471, "
+        "inter_voxel_creation.F:109), so whatever the Stfac this interface "
+        "carries no load on those parts." + measured)
+
+
 def _warn_stmin_floor(state: ConversionState, inter_id: int,
                       main_pids: Optional[Iterable[int]],
                       sec_pids: Optional[Iterable[int]],
@@ -4973,7 +5369,10 @@ def _warn_stmin_floor(state: ConversionState, inter_id: int,
                                    bool(main_l and sec_l))
     if istf not in _ISTF_RULES or not main_l or not sec_l:
         return
-    stmin = float(state.options.inter_stmin.get(inter_id, _TYPE7_STMIN))
+    # R14 round 10, A8: the Stmin the card was WRITTEN with (the rigid-tool
+    # cap can write less than 1000); the option / k2rad's floor otherwise
+    stmin = float(state.type7_written_stmin.get(
+        inter_id, state.options.inter_stmin.get(inter_id, _TYPE7_STMIN)))
     if not stmin > 0.0:
         return
     s = stfac if stfac > 0.0 else 1.0
@@ -5035,6 +5434,190 @@ def _warn_stmin_floor(state: ConversionState, inter_id: int,
         "stiffens contacts with K = 0 (ROADMAP round-9 NOT entry 11).")
 
 
+# --- R14 round 10, A8: the rigid-tool penalty cap ---------------------------
+
+#: the two non-automatic one-way spellings of the measured class (an _MPP
+#: sibling is the same card)
+_CAP_SPELLINGS = ("CONTACT_ONE_WAY_SURFACE_TO_SURFACE",
+                  "CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE")
+
+#: the measured effect, carried by the deck sentence (nt 4, README 9.1;
+#: the part-A-ii arms `C:/Users/pmqua/rcv_r10i_implA2_{pd,cup,hd,ca}_{base,
+#: new}`, each deck's part-A-i bytes and the capped bytes in one window)
+_A8_MEASURED = (
+    "MEASURED (nt 4, LS-DYNA glstat, README 9.1; each deck's part-A-i bytes "
+    "and the capped bytes in one window): pan.drawbead IE RMS 10.85 -> "
+    "4.01 %, KE RMS 14.24 -> 10.86 % (n 61, t in (1.365e-4, 8.386e-3]), "
+    "the punch contact's total force |FN + FT| (the like-for-like of "
+    "LS-DYNA's rcforc resultant) RMS 474.43 -> 46.72 % of LS's peak (its "
+    "normal force FN alone 448.56 -> 41.63 %), with its first two "
+    "IE fifths worse (-13.33 / -82.43 -> -96.70 / -99.15 %); "
+    "mat_transversely_anisotropic.cup-draw IE RMS 5.57 -> 3.43 % (n 150) "
+    "with a named COST on the KE: END -42.14 -> -49.31 % (fifths -75.33 / "
+    "+204.60 / +10.76 / -54.21 / -42.14 -> -55.00 / +11.60 / +10.55 / "
+    "-58.45 / -49.31), KE RMS 29.17 -> 28.83 %; hemi.draw IE RMS 1.25 -> "
+    "0.99 %, KE RMS 39.60 -> 36.19 % (n 120); control_adaptive.cup-draw IE "
+    "RMS 12.86 -> 13.02 % (n 699), its three contact forces |FN + FT| "
+    "13.49 / 15.40 / 20.79 -> 14.34 / 15.62 / 22.16 % (all three worse).")
+
+
+class _ToolCap(NamedTuple):
+    """One interface's rigid-tool penalty cap (round 10, A8)."""
+    stmax: float       # 2 x k_LS
+    stmin: float       # min(_TYPE7_STMIN, stmax)
+    k_ls: float        # SLSFAC x min(SFM x k_main, SFS x k_sec)
+    k_main: float      # the tool side's median K A / dmax
+    k_sec: float       # the blank side's median K A / dmax
+    n_main: int
+    n_sec: int
+    slsfac: float
+    sfs: float
+    sfm: float
+
+
+def _ls_shell_penalty(state: ConversionState, pids: Set[int]
+                      ) -> Tuple[Optional[float], int]:
+    """``(median, n)`` over every shell of *pids* of LS-DYNA's segment
+    stiffness K A / max(shell diagonal) (Theory R16 eq. 30.8), K = E / (3 (1
+    - 2 nu)) from :func:`_part_e_nu` (the K-02 lookup): a quad's A = |d13 x
+    d24| / 2 and dmax = max(|d13|, |d24|), a triangle's (3 distinct nodes)
+    A = |e1 x e2| / 2 and dmax its longest edge (:func:`_face_area`). A shell
+    whose part has no E (or nu >= 0.5) is left out; ``(None, 0)`` when no
+    shell remains."""
+    def _len(a, b) -> float:
+        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+                         + (a[2] - b[2]) ** 2)
+    vals: List[float] = []
+    for e in state.shell_elems:
+        if e.pid not in pids:
+            continue
+        en = _part_e_nu(state, e.pid)
+        if en is None or not en[1] < 0.5:
+            continue
+        pts = _node_xyz(state.nodes,
+                        list(dict.fromkeys(n for n in e.nodes if n > 0)))
+        if pts is None or len(pts) not in (3, 4):
+            continue
+        if len(pts) == 4:
+            dmax = max(_len(pts[2], pts[0]), _len(pts[3], pts[1]))
+        else:
+            dmax = max(_len(pts[1], pts[0]), _len(pts[2], pts[1]),
+                       _len(pts[0], pts[2]))
+        if dmax > 0.0:
+            vals.append(en[0] / (3.0 * (1.0 - 2.0 * en[1]))
+                        * _face_area(pts) / dmax)
+    return (_median(vals), len(vals)) if vals else (None, 0)
+
+
+def _rigid_tool_cap(state: ConversionState, c: ContactAutoSurf2Surf,
+                    plan: str, main_pids: Set[int], sec_pids: Set[int]
+                    ) -> Tuple[Optional[_ToolCap], str]:
+    """R14 round 10, A8 (``--rigid-tool-penalty-cap``, default ON): the cap
+    of one surface-to-surface ``/INTER/TYPE7`` - ``(cap, "")``, or ``(None,
+    refusal)``; refusal "" = outside the class or the opt-out (silent).
+
+    THE CLASS (the four R14 decks measured): a non-automatic
+    ``*CONTACT_ONE_WAY_SURFACE_TO_SURFACE`` / ``_FORMING_ONE_WAY_`` (+ _MPP)
+    whose emitted main side is all rigid (``rigid_part_ids``: a deformable
+    tool - the ring trio's *MAT_ELASTIC wall - is out). Refused by name
+    inside it: the all-rigid-SSID route (a rigid secondary side), SOFT 1 /
+    2, PENOPT 2-5, a negative SLSFAC / SFS / SFM, a solid side, a side with
+    no Young's modulus. THE RULE: k_LS = SLSFAC x min(SFM x k_main, SFS x
+    k_sec), k = the median LS-DYNA Theory R16 eq. 30.8 segment stiffness (K A
+    / max diagonal) over the side's shells, SLSFAC / SFS / SFM 0 = 0.1 / 1 /
+    1; Stmax = 2 k_LS - an Istf-4 TYPE7 applies 1/2 K per node
+    (``i7for3.F:976``) and combines MAX(Stmin, MIN(Km, Ks, Stmax))
+    (``i7cor3.F:277-288``), so each blank node gets k_LS - and Stmin =
+    min(1000, Stmax), so the floor never lifts the cap."""
+    kw = c.keyword[:-4] if c.keyword.endswith("_MPP") else c.keyword
+    if kw not in _CAP_SPELLINGS or not state.options.rigid_tool_penalty_cap:
+        return None, ""
+    if not main_pids or not set(main_pids) <= rigid_part_ids(state):
+        return None, ""                 # a deformable tool: silent
+    if plan != _RS_NONE:
+        return None, "a rigid secondary side (the all-rigid-SSID route)"
+    if c.soft != 0:
+        return None, (f"SOFT {c.soft} (its penalty is not eq. 30.8: Theory "
+                      "R16 eq. 30.9-30.11)")
+    ctrl = state.ctrl_contact
+    penopt = ctrl.penopt if ctrl is not None else 1
+    if penopt not in (0, 1):
+        return None, (f"*CONTROL_CONTACT PENOPT {penopt} (only 0 / 1 take the "
+                      "minimum of the two sides)")
+    slsfac = ctrl.slsfac if ctrl is not None else 0.1
+    if slsfac < 0.0:
+        return None, (f"*CONTROL_CONTACT SLSFAC {slsfac:g} (a value LS-DYNA "
+                      "does not define)")
+    if c.sfs < 0.0 or c.sfm < 0.0:
+        return None, (f"Card 3 SFS {c.sfs:g} / SFM {c.sfm:g} (a negative "
+                      "penalty scale)")
+    solid = ({e.pid for e in state.solid_elems}
+             | {e.pid for e in state.tshell_elems})
+    if solid & (set(main_pids) | set(sec_pids)):
+        return None, "a solid side (eq. 30.7 has no measured carrier)"
+    km, nm = _ls_shell_penalty(state, set(main_pids))
+    ks, ns = _ls_shell_penalty(state, set(sec_pids))
+    if km is None or ks is None:
+        return None, "no Young's modulus on a side (contacts._part_e_nu)"
+    slsfac = slsfac or 0.1
+    sfs, sfm = (c.sfs or 1.0), (c.sfm or 1.0)
+    k_ls = slsfac * min(sfm * km, sfs * ks)
+    stmax = 2.0 * k_ls
+    return _ToolCap(stmax, min(_TYPE7_STMIN, stmax), k_ls, km, ks, nm, ns,
+                    slsfac, sfs, sfm), ""
+
+
+def _warn_tool_cap(state: ConversionState, c: ContactAutoSurf2Surf,
+                   cap: _ToolCap, sec_pids: Set[int]) -> None:
+    """W-A8-cell: one sentence per capped interface, its numbers."""
+    ests = _part_stiffness(state, sorted(sec_pids))
+    et = [x.k_sec for x in ests.values() if x is not None
+          and x.kind == "shell"]
+    alone = (f" where k2rad's card alone gives 1/2 E t = "
+             f"{0.5 * _median(et):g}" if et else "")
+    floor = (f"Stmin = min(1000, Stmax) = {cap.stmin:g}"
+             if c.inter_id not in state.options.inter_stmin else
+             f"Stmin = --inter-stmin {state.type7_written_stmin.get(c.inter_id, cap.stmin):g}"
+             + (" (above Stmax: the floor then sets K, i7cor3.F:288)"
+                if state.type7_written_stmin.get(c.inter_id, 0.0) > cap.stmax
+                else ""))
+    state.warn(
+        f"*{c.keyword} {c.inter_id} -> /INTER/TYPE7/{c.inter_id}: the "
+        f"rigid-tool penalty cap Stmax = 2 x k_LS = {cap.stmax:g} and "
+        f"{floor}, with k_LS = SLSFAC x min(SFM x k_tool, SFS x k_blank) = "
+        f"{cap.slsfac:g} x min({cap.sfm:g} x {cap.k_main:g}, {cap.sfs:g} x "
+        f"{cap.k_sec:g}) = {cap.k_ls:g}: LS-DYNA Theory R16 eq. 30.8 (K A / "
+        "max shell diagonal, K = E / (3 (1 - 2 nu)), the median over the "
+        f"{cap.n_main} tool and {cap.n_sec} blank shells) x SLSFAC x SF. The "
+        "factor 2 undoes the 1/2 an Istf-4 TYPE7 applies per node "
+        "(i7for3.F:976), so where Stmax binds (the starter's own K above "
+        "it) the engine's MAX(Stmin, MIN(Km, Ks, Stmax)) "
+        "(i7cor3.F:277-288) gives each blank node 1/2 K = k_LS" + alone
+        + ". --no-rigid-tool-penalty-cap writes Stmax 0.")
+
+
+def _warn_tool_cap_deck(state: ConversionState) -> None:
+    """W-A8-deck: ONE sentence per deck with a capped interface - the
+    formula's status, the class, every excluded class, the measured
+    effect."""
+    state.warn(
+        "The rigid-tool penalty cap (round 10, A8) is LS-DYNA Theory eq. "
+        "30.8 x SLSFAC x SF - the manual's formula, which LS-DYNA's own runs "
+        "do not show as their holder penalty: on "
+        "mat_transversely_anisotropic.cup-draw its rcforc force over the "
+        "penetration of the flange nodes in its d3plot is about 200 N/mm per "
+        "node, ~100x below the formula's 20565, and on pan.drawbead's binder "
+        "1.36x above it. It is written only on a non-automatic "
+        "*CONTACT_ONE_WAY_SURFACE_TO_SURFACE / "
+        "*CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE with an all-rigid shell "
+        "tool, SOFT 0 and PENOPT 0 / 1 - the class four R14 decks measured; "
+        "NOT on *CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE (14 Ryan_Lee W13 "
+        "files, no LS-DYNA reference), the two-way *CONTACT_SURFACE_TO_SURFACE "
+        "(20 R14 keys with a rigid main), MORTAR, PENOPT 2-5, SOFT 1 / 2, a "
+        "solid side (eq. 30.7) or a deformable tool. " + _A8_MEASURED
+        + " --no-rigid-tool-penalty-cap writes Stmax 0.")
+
+
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       mast_id: int, fric: float, inacti: int = 0,
                       viss: float = 0.0, visf: float = 0.0,
@@ -5044,13 +5627,22 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       state: Optional[ConversionState] = None,
                       thermal: Optional["_ThermalCells"] = None,
                       tstart: float = 0.0,
-                      tstop: float = 0.0) -> List[str]:
+                      tstop: float = 0.0,
+                      stmax: float = 0.0,
+                      stmin_cap: Optional[float] = None) -> List[str]:
     """One ``/INTER/TYPE7`` block.
 
     ``tstart`` / ``tstop`` fill the Tstart / Tstop cells (round 9, A2: the
     routed implicit node-to-surface contact carries the deck's BT / DT); 0 is
     written as today's ``0`` (a Tstop of 0 is 'never',
     hm_read_inter_type07.F:544), so every other caller is byte-identical.
+
+    ``stmax`` / ``stmin_cap`` are the rigid-tool penalty cap (R14 round 10,
+    A8, :func:`_rigid_tool_cap`): Stmax in Card 3 (0 = the reader's 1e30,
+    ``hm_read_inter_type07.F:479-486``: today's ``0``) and Stmin = min(the
+    floor, ``stmin_cap``) unless ``--inter-stmin`` names the interface (the
+    user's value wins). The WRITTEN Stmin is recorded in
+    ``state.type7_written_stmin`` for the K-02 sentence.
 
     ``Fpenmax`` is derived from ``inacti`` HERE, in the single emitter, rather
     than at each of the four call sites — a guard keyed on one caller goes dead
@@ -5106,6 +5698,10 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
             "MAX(Stmin, K) (i7cor3.F:251-301)"
             + (": with 0 a secondary node no element stiffens contacts with "
                "K = 0." if stmin == 0.0 else "."))
+    elif stmin_cap is not None:
+        stmin = min(stmin, stmin_cap)        # round 10, A8: min(1000, Stmax)
+    if state is not None:
+        state.type7_written_stmin[inter_id] = stmin
     fpenmax = _FPENMAX_ZERO_NORMAL if inacti in _FPENMAX_INACTI else 0.0
     if fpenmax and state is not None:
         state.warn(
@@ -5135,7 +5731,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#          Fscalegap             GAP_MAX             Fpenmax",
         f"                   0                   0{_f(fpenmax)}",
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
-        f"{_f(stmin)}                   0                   0                   0         0",
+        f"{_f(stmin)}{_f(stmax)}                   0                   0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
         f"{_f(stfac)}{_f(fric)}{_f(gapmin)}{_f(tstart)}{_f(tstop)}",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
@@ -5434,8 +6030,9 @@ def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
     keeps 0 (today's cell, the /DEFAULT square gap) and, where the
     interface's parts (*pids*) hold a shell, notes LS-DYNA's longer
     free-edge reach; SRNDE 2 (square edges) keeps 0 silently. For SOFT 2
-    a non-zero SHLEDG (Card D) or DEPTH 23/33/35/55 takes precedence and
-    SRNDE is not used (p.11-117); a Mortar card reads none of Cards D-G
+    a non-zero SHLEDG (Card D, or *CONTROL_CONTACT Card 6 under a Card D 0 -
+    round 10, B7) or DEPTH 23/33/35/55 takes precedence and SRNDE is not
+    used (p.11-117); a Mortar card reads none of Cards D-G
     ("Shell edges are always flat", Table 11-1 p.11-135). SRNDE acts on
     exterior SHELL edges ("non-extended exterior shell segment edges",
     p.11-114), so with no shell in *pids* SRNDE 1 keeps 0 too, said (a solid
@@ -5448,9 +6045,17 @@ def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
     if "MORTAR" in _contact_base_spelling(kw):
         return 0
     has_shell = _pids_shell_solid(state, pids)[0]
-    if c.soft == 2 and (c.shledg or c.depth in _SOFT2_FLUSH_DEPTHS):
+    # round 10, B7: a Card D SHLEDG 0 defaults to *CONTROL_CONTACT's Card 6
+    # SHLEDG (Vol I R17 p.11-111), and "SRNDE is ignored unless SHLEDG is 0
+    # on both *CONTACT and *CONTROL_CONTACT" (p.11-117, the SOFT 2 paragraph)
+    ctrl_shledg = (state.ctrl_contact.shledg
+                   if state.ctrl_contact is not None else 0)
+    if c.soft == 2 and (c.shledg or ctrl_shledg
+                        or c.depth in _SOFT2_FLUSH_DEPTHS):
         rule = (f"SHLEDG {c.shledg} (Card D)" if c.shledg
-                else f"DEPTH {c.depth}")
+                else f"*CONTROL_CONTACT SHLEDG {ctrl_shledg} (Card 6, "
+                     "p.12-79; the default of Card D's SHLEDG 0, p.11-111)"
+                if ctrl_shledg else f"DEPTH {c.depth}")
         if c.srnde:
             state.warn(
                 f"*{kw} {inter_id}: Card E SRNDE {c.srnde} is not used: with "
@@ -5909,7 +6514,10 @@ def _general_route_gap(c) -> Tuple[str, str, str]:
         rule = ("with Istf 2, Igap 2: a variable gap, max(Gapmin, t_s/2 + "
                 "t_m/2) from the elements' thicknesses (a *PART_CONTACT OPTT "
                 "first, i7sti3.F:230-250 / 494-501), so the Card-3 SST/MST "
-                "set only its Gapmin floor")
+                "set only its Gapmin floor: |SST| on a self-contact of "
+                "shells only (CardStack K-12, round 10; "
+                "--no-single-surface-sst-gap keeps the old value), else "
+                "(|SST| + |MST|)/2")
     else:
         rule = ("with a constant gap, Gapmin from the Card-3 SST/MST: |SST| "
                 "on a self-contact of shells only (CardStack K-12; "
@@ -5939,8 +6547,9 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
         scale-weighted fabs(SST*SFST + MST*SFMT)/2. These coincide whenever the
         Card-3 scale factors are blank/unit and SST/MST share a sign (the usual
         case); they differ only for non-unit SFST/SFMT or mixed-sign thicknesses.
-        A self-mirrored -11 / -19 card over shells only takes |SST| instead
-        (``_single_surface_sst_gapmin``, CardStack K-12, default ON).
+        A self-mirrored -7 / -11 / -19 card over shells only takes |SST|
+        instead (``_single_surface_sst_gapmin``, CardStack K-12, default ON;
+        the -7 one since round 10, B1).
       * Inacti via ``_ignore_to_inacti`` (=5 explicit) rather than dyna2rad's
         fixed 6 — Inacti=5 is the validated k2rad convention. The node-moving
         values are Inacti 3 / 4 (i7pwr3.F:208-243), and the engine seg-fault
@@ -6017,20 +6626,21 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "Gapmin exceeds the physical clearance; ignore=1/2 (and "
                     "any explicit deck) maps to Inacti=5, which shrinks the "
                     "gap back to the clearance.")
-        elif self_contact and c.soft in (-11, -19):
+        elif self_contact and c.soft in (-7, -11, -19):
             # CardStack K-12: the self-mirrored -11 / -19 cards are Igap-0
-            # single-surface routes - |SST| on a set of shells only
+            # single-surface routes - |SST| on a set of shells only; the
+            # SOFT -7 TYPE7 (Igap 2) takes |SST| too (round 10, B1): its
+            # gap is max(Gapmin, t_s/2 + t_m/2), so |SST| acts above t
+            self_pids = _contact_master_pids(state, c.ssid, c.sstyp)
             gapmin = _single_surface_sst_gapmin(
-                state, c.inter_id, c.sst, c.mst,
-                _contact_master_pids(state, c.ssid, c.sstyp), tname)
+                state, c.inter_id, c.sst, c.mst, self_pids, tname,
+                igap2=c.soft == -7)
+            if c.soft == -7:
+                # CardStack K-12: Igap 2 - SST below t never acts
+                _warn_soft7_sst_below_t(state, c, gapmin, self_pids)
         else:
             gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id,
                                         target=tname)
-            if self_contact and c.soft == -7:
-                # CardStack K-12: Igap 2 - SST below t never acts
-                _warn_soft7_sst_below_t(
-                    state, c, gapmin,
-                    _contact_master_pids(state, c.ssid, c.sstyp))
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin,
                                    target=tname)
         viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
@@ -6527,8 +7137,15 @@ def _solid_pids_by_part(state: ConversionState) -> Dict[int, int]:
 
 def _type25_surface(state: ConversionState, c, sid: int, styp: int,
                     tag: str, out_lines: List[str],
-                    sid_zero_is_all_parts: bool = False) -> int:
+                    sid_zero_is_all_parts: bool = False,
+                    written_pids: Optional[Set[int]] = None) -> int:
     """Emit one side's /SURF for a TYPE25 contact and return its id (0 = none).
+
+    *written_pids* (R14 round 10, verification round): when given, it gains
+    the parts of a part-scoped surface this call WRITES - so a caller names
+    what the interface really holds (a SURFATYP 5 side expands to every part
+    here, whatever its SSID says); a *SET_SEGMENT / *SET_SHELL side adds
+    nothing (it names segments, not parts).
 
     The whole point of the eroding batch lives here: for an ``*CONTACT_ERODING_*``
     whose side resolves to SOLID parts, the surface is built with ``/SURF/PART/
@@ -6628,6 +7245,8 @@ def _type25_surface(state: ConversionState, c, sid: int, styp: int,
     if not _make_master_surface(state, surf_id, tag, sorted(pids), out_lines,
                                 solid_all=solid_all):
         return 0
+    if written_pids is not None:
+        written_pids.update(pids)
     return surf_id
 
 
@@ -6746,12 +7365,16 @@ def n2s_routed(state: ConversionState, c) -> bool:
 #: -0.1922 mm on the TYPE25, at t 1.0.
 _N2S_TYPE7_MEASURED = (
     "MEASURED on implicit/basic-examples/springback-i/doorbeam.k with the "
-    "part drive: internal energy END -0.78 .. -28.12 % against LS-DYNA, RMS "
+    "part drive, on the pre-round-10 bytes: internal energy END -0.78 .. "
+    "-28.12 % against LS-DYNA, RMS "
     "7.21 .. 15.26 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], "
     "in 125 runs of the same bytes at nt 4 and nt 2 - the route scatters run "
     "to run on three branches: 102 runs at -27.76 .. -28.12 %, 21 at -15.85 "
     ".. -16.27 % (both at nt 4 and nt 2) and two single nt-4 runs nearer LS "
-    "(-8.36 %, -0.78 %) - where the TYPE25 ended +53.91 % / RMS 81.05 %. "
+    "(-8.36 %, -0.78 %) - where the TYPE25 ended +53.91 % / RMS 81.05 %. On "
+    "the round-10 bytes (the SHRF rule writes doorbeam's two Ashear cells) "
+    "12 runs at nt 4 and nt 2 end at -21.37 .. -21.41 % (RMS 14.67 .. 14.69 "
+    "%): no second branch is seen in them, which does not exclude one. "
     "CHECK THAT THE CONTACT CARRIES LOAD - with four contact nodes on a "
     "coarse RIGID base the outcome depends on the geometry: on one two-block "
     "coupon this route ends NORMAL TERMINATION with the block through the "
@@ -6760,7 +7383,14 @@ _N2S_TYPE7_MEASURED = (
     "block through (-0.1708 mm at t 0.9) and stops at 98 % of t_end behind a "
     "NORMAL TERMINATION; with the block's four nodes over the base's corners "
     "BOTH let it through behind a NORMAL banner (gap -0.19 mm at t 1.0) - "
-    "the TYPE25 default fails silently too.")
+    "the TYPE25 default fails silently too. On an ELASTIC base the outcome "
+    "VARIES RUN TO RUN on identical bytes: a one-hex block (its 4 bottom "
+    "nodes the secondary side) driven onto a 2 x 2-hex elastic base ended in "
+    "5 of 7 runs NORMAL TERMINATION with the block through the base, in 1 "
+    "NORMAL with the block held and in 1 ERROR TERMINATION on the implicit "
+    "TIMESTEP LIMIT (nt 4 and nt 2); a frictionless 9-node block pressed "
+    "onto an elastic base sat 0.02 mm inside it with zero contact work "
+    "behind a NORMAL TERMINATION (nt 4 = nt 2).")
 
 
 def _routed_stub_clause(state: ConversionState) -> str:
@@ -6998,6 +7628,9 @@ def _make_type25_interfaces(state: ConversionState,
                 # _type25_ishape, so a stated Card E is named here
                 _warn_card_e_type7(state, c, kw, viss)
                 continue
+            # round 10, B6: the parts a no-contact-stiffness law is named on
+            law_pids = ish_pids | _secondary_pids(state, sec25_sid, sec25_styp,
+                                                  rigid_nodes, keep25)
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
                 "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "
@@ -7008,14 +7641,35 @@ def _make_type25_interfaces(state: ConversionState,
         else:
             single = c.variant == "SINGLE_SURFACE"
             tag = ("self" if single else "secnd")
+            # K-16's Ishape scope: an SSID = 0 single surface is every part;
+            # a SURFATYP 5 card with a stated SSID is not counted here (the
+            # surface below expands it) - an emitted cell, kept as it is
+            # (ROADMAP: a round-11 question)
             ish_pids = (set(state.parts) if single and c.ssid == 0 else   # K-16
                         _contact_master_pids(state, c.ssid, c.sstyp)
                         | _contact_master_pids(state, c.msid, c.mstyp))
+            # round 10, B6 (verification round): the parts of the surfaces
+            # this interface really WRITES (this record type keeps its own
+            # SSID = 0 / SURFATYP 5 expansion in _type25_surface; it is not a
+            # state.contacts_single record, so writer/common.single_surface_
+            # scope does not decide it)
+            written: Set[int] = set()
             # Only a SINGLE_SURFACE reads SSID=0 as "all parts" (Vol I p.11-24).
             surf1 = _type25_surface(state, c, c.ssid, c.sstyp,
                                     f"contact_{c.inter_id}_{tag}", lines,
-                                    sid_zero_is_all_parts=single)
+                                    sid_zero_is_all_parts=single,
+                                    written_pids=written)
             if not surf1:
+                if c.sstyp in (6, 7):
+                    # the type's meaning, not the false "names no part"
+                    _drop_interface(
+                        state, dropped, kw, c.inter_id,
+                        f"the SECONDARY (SSID) side ssid={c.ssid}: "
+                        + _styp567_clause(c.ssid, c.sstyp)
+                        + " - the eroding /INTER/TYPE25 route builds its "
+                        "surface from a part, a part set or SURFATYP 5 only",
+                        _styp567_remedy(c.ssid, c.sstyp))
+                    continue
                 _drop_interface(
                     state, dropped, kw, c.inter_id,
                     f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
@@ -7028,8 +7682,19 @@ def _make_type25_interfaces(state: ConversionState,
                 continue
             if c.variant == "SURFACE_TO_SURFACE":
                 surf2 = _type25_surface(state, c, c.msid, c.mstyp,
-                                        f"contact_{c.inter_id}_main", lines)
+                                        f"contact_{c.inter_id}_main", lines,
+                                        written_pids=written)
                 if not surf2:
+                    if c.mstyp in (6, 7):
+                        _drop_interface(
+                            state, dropped, kw, c.inter_id,
+                            f"the MAIN (MSID) side msid={c.msid}: "
+                            + _styp567_clause(c.msid, c.mstyp)
+                            + " - the eroding /INTER/TYPE25 route builds its "
+                            "surface from a part, a part set or SURFATYP 5 "
+                            "only",
+                            _styp567_remedy(c.msid, c.mstyp))
+                        continue
                     _drop_interface(
                         state, dropped, kw, c.inter_id,
                         f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} "
@@ -7048,6 +7713,7 @@ def _make_type25_interfaces(state: ConversionState,
                     "self-contact (surf_ID1=the one surface, surf_ID2=0 -> "
                     f"starter ILEV=1, self-impact), Istf={istf}, Igap=2, "
                     f"Idel={_TYPE25_IDEL}, Iedge={iedge}.")
+            law_pids = ish_pids | written           # round 10, B6
 
         # CardStack K-11: the Card-2 BT / DT sign rules (a negative DT used
         # to be written as a negative Tstop); "no death time" is written 0,
@@ -7058,6 +7724,7 @@ def _make_type25_interfaces(state: ConversionState,
         # are the surfaces' (a node-to-surface one: its main side's, after
         # any rigid swap; an SSID = 0 single surface: every part)
         ishape = _type25_ishape(state, c, kw, c.inter_id, ish_pids)
+        _warn_type25_no_contact_stiffness(state, c.inter_id, law_pids)  # B6
         lines += _emit_inter_type25(
             c.inter_id, c.title, surf1, surf2, grnod_id=grnod, istf=istf,
             igap=2, idel=_TYPE25_IDEL, iedge=iedge, stfac=stfac, fric=fric,
@@ -8765,11 +9432,13 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         if _make_master_surface(state, cand, f"tiebreak_{c.inter_id}_post_surfa",
                                 sec_pids, out):
             sec_surf = cand
+    comp_stfac, stfac_note = _tiebreak_companion_stfac(state, c, comp_id)
     if sec_surf:
         out += _emit_inter_type25(comp_id,
                                   f"post_rupture_contact_{c.inter_id}",
                                   sec_surf, surf_id, istf=4, inacti=5,
-                                  fric=fric, fric_id=fric_id, irem_i2=3)
+                                  stfac=comp_stfac, fric=fric,
+                                  fric_id=fric_id, irem_i2=3)
         shape = (f"symmetric surface-to-surface (/SURF/{sec_surf} vs "
                  f"/SURF/{surf_id})")
     else:
@@ -8779,15 +9448,11 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         out += _emit_inter_type25(comp_id,
                                   f"post_rupture_contact_{c.inter_id}",
                                   0, surf_id, grnod_id=grnod_id, istf=4,
-                                  inacti=5, fric=fric, fric_id=fric_id,
-                                  irem_i2=3)
+                                  inacti=5, stfac=comp_stfac, fric=fric,
+                                  fric_id=fric_id, irem_i2=3)
         shape = (f"one-way node-to-surface (/GRNOD/NODE/{grnod_id} vs "
                  f"/SURF/{surf_id})")
     state.companion_inter_ids.append(comp_id)
-    if state.options.soften_stfac is not None:
-        # Stfac stays 0 (the engine default) here: named in the one
-        # --soften-stfac summary (_report_contact_lever_reach)
-        state.soften_stfac_unreached.append(comp_id)
     fric_note = (f"Fric={fric:g}" if fric_id == 0
                  else f"Fric={fric:g} with fric_ID={fric_id}")
     state.warn(
@@ -8809,8 +9474,58 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         "a zero gap, so Inacti=0 and Inacti=5 measure identically there. "
         "Inacti=5 is the DEFENSIVE choice for the untested case, a SHELL "
         "tiebreak, where Igap=2 gives a half-thickness gap that two coincident "
-        "mid-surfaces sit inside.")
+        "mid-surfaces sit inside." + stfac_note)
     return out
+
+
+def _tiebreak_companion_stfac(state: ConversionState, c: ContactTiebreak,
+                              comp_id: int) -> Tuple[float, str]:
+    """Round 10, B3 (default ON, ``--no-tiebreak-companion-stfac``): the
+    Stfac cell of the post-rupture companion ``/INTER/TYPE25`` *comp_id* and
+    the sentence the companion line appends ("" when the cell is 0).
+
+    LS-DYNA's tiebreak "behaves as a surface-to-surface contact" after
+    failure (Vol I R17 p.11-39 Remark 1), and Card 3's SFSA / SFSB scale the
+    penalty of the SURFA / SURFB side (p.11-33); a TYPE25 has ONE Stfac, on
+    the segments (``i25sti3.F:140``, SLSFAC = STFAC) and, with Istf > 1, on
+    the secondary nodes (``inintr1.F:94-99`` -> ``i25stslav.F:56-64``). So:
+    ``--soften-stfac`` when given (recorded as reached), else min(SFS, SFM)
+    with a blank / 0 / negative value read 1.0 - dyna2rad's rule for the
+    family (``convertcontacts.cxx:410-414``, ``:444-449``) - written 0 at 1.0
+    (``hm_read_inter_type25.F:620-622`` turns 0 into 1.0), so a card with
+    SFS = SFM = 1 keeps its bytes. With the opt-out the cell stays 0 and an
+    ``--soften-stfac`` names the companion as not reached, the code before
+    round 10."""
+    if not state.options.tiebreak_companion_stfac:
+        if state.options.soften_stfac is not None:
+            # named in the one --soften-stfac summary
+            # (_report_contact_lever_reach)
+            state.soften_stfac_unreached.append(comp_id)
+        return 0.0, ""
+    if state.options.soften_stfac is not None:
+        _record_soften_reach(state, "TYPE25", comp_id)
+        v = state.options.soften_stfac
+        src = (f"--soften-stfac {v:g}, which overrides the card's Card-3 "
+               "SFS / SFM here as on every penalty interface")
+    else:
+        sfs = c.sfs if c.sfs > 0.0 else 1.0
+        sfm = c.sfm if c.sfm > 0.0 else 1.0
+        v = min(sfs, sfm)
+        src = (f"the card's Card-3 min(SFS, SFM) = min({sfs:g}, {sfm:g}): "
+               "the post-failure contact carries the card's penalty scale "
+               "(Vol I R17 p.11-33 SFSA / SFSB; dyna2rad's min, "
+               "convertcontacts.cxx:444-449)")
+    if v == 1.0:
+        return 0.0, ""
+    return v, (
+        f" Stfac={v:g} on the companion, from {src} (round 10). A TYPE25 "
+        "Stfac scales its segments (i25sti3.F:140) and, with Istf 4, its "
+        "secondary nodes (inintr1.F:94-99, i25stslav.F:56-64). MEASURED on a "
+        "two-block "
+        "tiebreak coupon (nt 4): Stfac 0.3 against the starter's 1.0 deepens "
+        "the re-contact penetration 0.000914 -> 0.002344 mm, in 515 instead "
+        "of 685 cycles. --no-tiebreak-companion-stfac writes 0 (the "
+        "starter's 1.0).")
 
 
 #: Card-4 cell -> the OPTIONs that actually READ it, from the field list on

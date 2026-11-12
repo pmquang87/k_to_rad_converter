@@ -59,6 +59,7 @@ from .mesh import (
     _snap_tet10_midsides,
     _synthesize_beam_orientation_nodes,
     _synthesize_vector_skews,
+    _warn_shrf_other_routes,
 )
 from .composites import (
     _assign_composite_props,
@@ -156,6 +157,7 @@ from .blast_ale import (
     _make_shell_in_solid_coupling,
     _make_shell_in_solid_notes,
     _resolve_shell_in_solid,
+    _resolve_initial_void_copy,
     _make_ale_reference_notes,
     finalize_shell_in_solid,
     sis_dt_inter_guard,
@@ -591,9 +593,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # (anim_build_index_all.F:152-167); MEMB stays on its own line. The
     # field is DbExtentBinary.maxint (card 1 field 3, default 3), stored by
     # handle_database_extent_binary since the CardStack wave C, so a deck
-    # that states MAXINT > 3 reaches this line. A MAXINT < -3 (|MAXINT|
+    # that states MAXINT > 3 reaches this line. A MAXINT < 0 (|MAXINT|
     # points at every in-plane point, no averaging) is named in the handler
-    # log and not written here (ROADMAP). --no-maxint-stress-all (the
+    # log and not written here (ROADMAP; -3 .. -1 named since R14 round 10,
+    # A14). --no-maxint-stress-all (the
     # user's decision 8 of 2026-11-01) writes no such line whatever MAXINT
     # says - the engine deck of the code before the read - and the
     # handler's MAXINT line says so.
@@ -1510,7 +1513,13 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # The engine defect on this path with an initial velocity (round 6,
         # B4) - warned here, in the branch that writes the card it is about.
         _warn_implicit_dynamic_initial_velocity(state, dyn.imass, gamma, beta)
+        # R14 round 10, A6: the starter /DAMP is inert in an implicit run;
+        # --implicit-rayleigh-damping writes the implicit card (opt-in)
+        lines += _implicit_damping(state, dynamic=True,
+                                   first=seg is None or seg.first_implicit)
     else:
+        _implicit_damping(state, dynamic=False,
+                          first=seg is None or seg.first_implicit)
         # /IMPL/QSTAT/DTSCAL: the inertia-stabilization scale. imp_dyna.F:351
         # builds S = (1+D_AL)*DY_B*DT2*DT2, :353 multiplies it by SCAL_DTQ^2
         # and :355 takes BDT = 1/S, so the stabilization added to the stiffness
@@ -1661,9 +1670,171 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         lines.append("/IMPL/DT/FIXPOINT")
         for i in range(0, len(fixpts), 5):                   # ≤5 fields → ≤100 cols
             lines.append("".join(_f(t) for t in fixpts[i:i + 5]))
+    elif n_fix == 0:
+        # R14 round 10, A5 (--no-implicit-end-fixpoint opts out): no grid
+        # asked for (or one disarmed under RIKS) - a dynamic deck still gets
+        # ONE fix point at its end time
+        lines += _implicit_end_fixpoint(state, dyn, seg)
 
     lines.append("#")
     return lines
+
+
+def _implicit_end_fixpoint(state: ConversionState, dyn, seg) -> List[str]:
+    """R14 round 10, A5 (``implicit_end_fixpoint``, default ON,
+    ``--no-implicit-end-fixpoint``): ONE ``/IMPL/DT/FIXPOINT`` at the run's
+    end on a dynamic implicit engine deck - byte for byte the two lines
+    ``--fixpoint-count 1`` writes.
+
+    Why: under /IMPL/DYNA the engine does not clip an increment to the
+    remaining time (``imp_dt.F:53-56`` 'IF (IDYNA>0) DT_E = DT_IMP'; a static
+    run clips its last step, ``imp_dt.F:55``) and the run stops at the first
+    cycle whose time passes the end (``resol.F:8317-8318``, ``:8470``), so an
+    adaptive /IMPL/DT/2 run can end NORMAL one increment short of ENDTIM; the
+    fix point makes the step controller land on it (``imp_dt.F:302-321``
+    IMP_DTF cuts the step to the remainder, whatever its size - a sliver
+    remainder makes the last row an integration artifact, named in the
+    warning). Scope: /IMPL/DYNA/2 written (``*CONTROL_IMPLICIT_DYNAMICS``
+    IMASS > 0), the /IMPL/DT/2 step card (RIKS /IMPL/DT/3 disarms every fix
+    point, ``lectur.F:3523-3532``), no ``--fixpoint-count`` grid (the clamped
+    count is 0: a stated ``--fixpoint-count 0`` is the default), an end time
+    > 0. On an IMFLAG-curve segment (``--imflag-curve-restart``) the end is
+    the segment's own /RUN end; the warning is written once per deck."""
+    if not state.options.implicit_end_fixpoint:
+        return []
+    if dyn is None or dyn.imass <= 0:
+        return []
+    if _arclength_requested(state) and state.options.arclength_riks:
+        return []
+    if seg is not None:
+        t_end = seg.t_stop
+    elif state.ctrl_termination and state.ctrl_termination.endtim > 0:
+        t_end = state.ctrl_termination.endtim
+    else:
+        return []
+    if not t_end > 0.0:
+        return []
+    if seg is None or seg.first_implicit:
+        state.warn(
+            f"/IMPL/DT/FIXPOINT {t_end:g} (the end fix point; "
+            "--no-implicit-end-fixpoint writes none): on this dynamic implicit "
+            "deck (/IMPL/DYNA/2, /IMPL/DT/2) the engine does not clip the "
+            "last increment to the remaining time (imp_dt.F:53-56) and stops "
+            "at the first cycle past the end (resol.F:8317-8318), so the "
+            "adaptive step can end the run NORMAL below its end time; the fix "
+            "point lands it there. MEASURED on the R14 roster (nt 4 = nt 2): "
+            "the 9 keys / 5 models that ended below their end time reach it "
+            "at +1 cycle with the fifths 1-4 of the history unchanged; the END "
+            "value is then read AT the end time and moves both ways "
+            "(ex_14_solid_elform_1 IE END -14.44 % at t 0.01839 -> -33.66 % "
+            "at t 0.02; ex_11_beam_elform_1 KE END +1343.37 -> -78.46 %). "
+            "When the remainder is a sliver of the step the last increment "
+            "is cut to it (imp_dt.F:311-320) and the LAST row is an "
+            "integration artifact - measured on efg/metal-cutting/main.k "
+            "(step 2.0e-4 cut to 1.0e-5, ratio 0.05: the last row's KE 52.3 "
+            ".. 111.0 -> 3.57e8 .. 6.06e8 and ERROR 99.9 % at t 0.03 over "
+            "four runs of the same bytes at nt 4 - the listing does not "
+            "repeat digit for digit), on a 2 x 2 x 2-hex probe (2.0e-3 cut "
+            "to 1.05e-4, ratio 0.06: KE 0.160 -> 170.1, ERROR -99.9 %) and on "
+            "that probe with ENDTIM 0.0201 (ratio 0.115: KE 0.160 -> 37.16): "
+            "read the row before it.")
+    return ["/IMPL/DT/FIXPOINT", _f(t_end)]
+
+
+def _register_damp_cards(state: ConversionState,
+                         lines: List[str]) -> List[str]:
+    """R14 round 10, A6: record the /DAMP and /DAMP/FUNCT headers the starter
+    carries so far (the three damping sections run before this one); emits
+    nothing and draws no id. /DAMP/FREQUENCY_RANGE is not recorded: it acts
+    inside the material law, not in the nodal CALL DAMPING an implicit run
+    skips."""
+    state.damp_cards = [ln.strip() for ln in lines
+                        if ln.startswith("/DAMP/")
+                        and not ln.startswith("/DAMP/FREQUENCY_RANGE")]
+    return []
+
+
+def _implicit_damping(state: ConversionState, dynamic: bool,
+                      first: bool) -> List[str]:
+    """R14 round 10, A6: on an implicit run the starter /DAMP has no effect
+    ('/DAMP defined in Starter has no effect on implicit run', Reference
+    Guide 2022 /IMPL/DYNA/DAMP comment 2): the engine's only CALL DAMPING
+    (``resol.F:7216-7219``, with its DAMPING44 / DAMPING51 branches) sits in
+    the explicit block that ``resol.F:6406`` / ``:6547`` 'GOTO 111' skips.
+    Named by default on every implicit deck that carries one, once per deck
+    (*first*: the first implicit segment). Under
+    ``--implicit-rayleigh-damping`` (opt-in) a DYNAMIC deck's
+    ``*DAMPING_GLOBAL`` with LCID 0 and uniform STX..SRZ gets
+    ``/IMPL/DYNA/DAMP`` alpha = VALDMP x ST (all six 0 = unity, Vol I R17
+    p.15-9 Remark 2), beta 0 (``imp_dyna.F:1810-1828``: alpha x M x V, the
+    F = Ds m v of Remark 4); the starter /DAMP is kept. Every other case is
+    refused by name. Returns the engine lines (none unless the opt-in writes
+    the card)."""
+    if not state.damp_cards:
+        return []
+    ids = ", ".join(c for c in state.damp_cards[:10]) + (
+        f", ... ({len(state.damp_cards)} cards)"
+        if len(state.damp_cards) > 10 else "")
+    g = state.damping_global
+    card: List[str] = []
+    why_not = ""
+    if state.options.implicit_rayleigh_damping:
+        sts: List[float] = ([g.stx, g.sty, g.stz, g.srx, g.sry, g.srz]
+                            if g else [])
+        uniform = bool(sts) and all(s == sts[0] for s in sts)
+        if not dynamic:
+            why_not = ("not written: the deck is static (no "
+                       "*CONTROL_IMPLICIT_DYNAMICS IMASS > 0), and "
+                       "/IMPL/DYNA/DAMP alone turns an implicit run dynamic "
+                       "(freimpl.F:171 sets IDYNA)")
+        elif g is None:
+            why_not = "not written: no *DAMPING_GLOBAL card to carry"
+        elif g.lcid > 0:
+            why_not = (f"not written: *DAMPING_GLOBAL LCID {g.lcid} > 0, and "
+                       "/IMPL/DYNA/DAMP takes one constant alpha")
+        elif not uniform:
+            why_not = ("not written: *DAMPING_GLOBAL STX..SRZ are not "
+                       "uniform, and /IMPL/DYNA/DAMP damps every DOF alike")
+        elif state.damping_part_mass or state.damping_part_stiffness:
+            why_not = ("not written: *DAMPING_PART_MASS / _PART_STIFFNESS "
+                       "cards are part-scoped, and /IMPL/DYNA/DAMP is global")
+        elif not g.valdmp > 0.0:
+            why_not = "not written: *DAMPING_GLOBAL VALDMP is not positive"
+        else:
+            scale = sts[0] if sts[0] != 0.0 else 1.0
+            alpha = g.valdmp * scale
+            card = ["/IMPL/DYNA/DAMP", f"{_f(alpha)}{_f(0.0)}"]
+    if first:
+        what = (
+            f"{ids}: the starter /DAMP has NO effect on an implicit run "
+            "('/DAMP defined in Starter has no effect on implicit run', "
+            "Reference Guide 2022 /IMPL/DYNA/DAMP comment 2): the engine's "
+            "only CALL DAMPING (resol.F:7216-7219) sits in the explicit block "
+            "an implicit run skips (resol.F:6406 / :6547 'GOTO 111')")
+        if dynamic:
+            what += (", so the converted dynamic run is UNDAMPED where LS-DYNA "
+                     "damps it (its glstat 'system damping energy'). MEASURED "
+                     "on ex_14_solid_elform_1: deleting the /DAMP changes no "
+                     "printed figure of the run")
+        else:
+            what += " (this deck is static: no *CONTROL_IMPLICIT_DYNAMICS)"
+        if card:
+            what += (". --implicit-rayleigh-damping: /IMPL/DYNA/DAMP alpha = "
+                     f"{float(card[1][:20]):g}, beta 0 is written after "
+                     "/IMPL/DYNA/2 (imp_dyna.F:1810-1828, alpha x M x V = "
+                     "LS-DYNA's Ds m v); the starter /DAMP stays.")
+        elif why_not:
+            what += f". --implicit-rayleigh-damping: /IMPL/DYNA/DAMP {why_not}."
+        elif dynamic and g is not None and g.lcid == 0:
+            what += (". --implicit-rayleigh-damping writes /IMPL/DYNA/DAMP "
+                     "alpha = VALDMP after /IMPL/DYNA/2 (opt-in: on the shipped "
+                     "adaptive step it worsens ex_14_solid_elform_1's history, "
+                     "IE RMS 4.51 -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS "
+                     "peak over its 200 LS times, nt 4 = nt 2).")
+        else:
+            what += "."
+        state.warn(what)
+    return card
 
 
 def _make_engine_cpu(state: ConversionState) -> List[str]:
@@ -2289,6 +2460,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # materials (the void density cells) and the parts (a copy MID). Draws
     # no id unless a void host shares its *MAT_NULL; empty by default.
     _resolve_shell_in_solid(state)
+    # *INITIAL_VOID in a CLIS fluid set -> a LAW6 void copy (R14 round 10,
+    # A10 2b, default ON): the ONE decision, after B10's (it refuses a
+    # material B10's void density owns) and before the materials and the
+    # parts (its density cells, a copy MID - the only id it draws).
+    _resolve_initial_void_copy(state)
 
     # *ELEMENT_DISCRETE, MAT_100 spotweld beams and *ELEMENT_PLOTEL all become
     # /SPRING under their SOURCE-deck ids, which LS-DYNA keeps in three separate
@@ -3291,6 +3467,10 @@ def _starter_section_registry():
         ("properties",        lambda c: _make_properties(c.state)),
         ("composite_properties", lambda c: _emit_composite_props(c.state)),
         ("fabric_properties",    lambda c: _emit_fabric_props(c.state)),
+        # R14 round 10, verification round: the shell routes the SHRF rule
+        # does not reach (/PROP/TYPE9 / TYPE11 / TYPE51), named once per
+        # deck after every property is written. Writes no line, draws no id.
+        ("shrf_other_routes",    lambda c: _warn_shrf_other_routes(c.state)),
         ("seatbelt_2d_properties",
                                  lambda c: _emit_seatbelt_2d_props(c.state)),
         ("functions",         lambda c: _make_functions(c.state)),
@@ -3501,6 +3681,11 @@ def _starter_section_registry():
         ("damping_freq_range", lambda c: _make_damping_frequency_range(c.state)),
         ("damping_relative",  lambda c: _resolve_damping_relative(c.state,
                                                                   c.rbody_info)),
+        # R14 round 10, A6: AFTER the three damping sections above - the
+        # registry of the /DAMP cards the implicit engine writer names inert
+        # (resol.F:6406 / :6547 skip CALL DAMPING in an implicit run). Draws
+        # no id and emits nothing.
+        ("damp_registry",     lambda c: _register_damp_cards(c.state, c.lines)),
         ("starter_th",        lambda c: _make_starter_th(c.state)),
         ("starter_th_inter",  lambda c: _make_starter_th_inter(c.state)),
         ("starter_th_node_reac", lambda c: _make_starter_th_node_reac(c.state, c.rbody_info)),
@@ -3589,13 +3774,19 @@ def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
         Tsca  Tmin
 
     Tmin is emitted as 0.0 = no lower bound. Tmin on /DT is a run-STOP
-    threshold, and LS-DYNA's equivalent (TSLIMT) is a different field that this
-    handler does not parse; inventing one would stop runs the user never asked
-    to stop. Tsca is the only thing being carried across.
+    threshold; LS-DYNA's own floor is tsmin = DTMIN x dtstart of
+    *CONTROL_TERMINATION (Vol I R17 p.12-558), which k2rad does not compute,
+    and TSLIMT is a shell MODULUS floor, not a stop field (p.12-584 / 12-585;
+    R14 round 10, A11 - the sentence names both through _tsmin_clause).
+    Inventing a Tmin would stop runs the user never asked to stop. Tsca is
+    the only thing being carried across; a TSSFAC < 0 curve is named
+    (_tssfac_curve_sentence), not converted.
 
-    Only emitted when TSSFAC > 0. TSSFAC = 0 is LS-DYNA's "use my default"
-    (0.9), which is also OpenRadioss's /DT default, so there is nothing to
-    carry and the deck is left exactly as it converted before.
+    Only emitted when TSSFAC > 0. A blank TSSFAC is LS-DYNA's "use my
+    default", which is 0.9 - also OpenRadioss's /DT default, nothing to
+    carry - on a Remark 1 c deck only (Vol I R17 p.12-589): where Remark 1 a
+    / b makes it 0.667 / 0.333, k2rad still writes no /DT and names the
+    substitution (:func:`_warn_ls_default_tssfac`).
 
     DT2MS > 0 is NOT "no mass scaling": it is LS-DYNA's step of a
     mass-scaled solution for quasi-static or time-history runs (Vol I R17
@@ -3609,30 +3800,57 @@ def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
     tsca = ts.tssfac
     converted, positive = (_positive_dt2ms_clause(state, ts)
                            if ts.dt2ms > 0.0 else (False, ""))
+    if tsca and tsca < 0.0:
+        # R14 round 10, A11 (f3): a TSSFAC < 0 curve used to be dropped in
+        # silence on this path (the DT2MS < 0 path names it,
+        # _tssfac_for_dt2ms)
+        state.warn(_tssfac_curve_sentence(state, ts) + positive)
+        return []
     if not tsca or tsca <= 0.0:
         if positive and not converted:
             # the drop that used to be silent (no /DT to hang a text on)
             state.warn(f"*CONTROL_TIMESTEP{positive}")
         return []
+    # R14 round 10, A11: Tmin 0 is 'no lower bound'; TSLIMT is LS-DYNA's
+    # shell MODULUS floor, not a stop / delete field (the sentence said so
+    # before round 10), and LS-DYNA's own floor is *CONTROL_TERMINATION
+    # DTMIN x dtstart (named by _make_engine_dt_deletion)
+    floor = _tsmin_clause(state)
     if ts.dt2ms > 0.0:
         state.warn(
             f"*CONTROL_TIMESTEP TSSFAC={tsca:g} -> /DT Tsca={tsca:g}. The "
-            "time-step safety factor is carried over; Tmin=0 (no lower "
-            "bound) because LS-DYNA TSLIMT is not converted, so the engine "
-            "will not stop or delete on a small step." + positive)
+            "time-step safety factor is carried over; " + floor + positive)
     else:
         state.warn(
             f"*CONTROL_TIMESTEP TSSFAC={tsca:g} (DT2MS={ts.dt2ms:g}, no mass "
             f"scaling) -> /DT Tsca={tsca:g}. The time-step safety factor is "
-            "carried over; Tmin=0 (no lower bound) because LS-DYNA TSLIMT is "
-            "not converted, so the engine will not stop or delete on a small "
-            "step."
+            "carried over; " + floor
         )
     return [
         "/DT",
         f"{_f(tsca)}{_f(0.0)}",
         "#",
     ]
+
+
+def _tsmin_clause(state: ConversionState) -> str:
+    """R14 round 10, A11: the Tmin clause of the *CONTROL_TIMESTEP TSSFAC
+    sentence. The /DT card's Tmin 0 is 'no lower bound'; LS-DYNA's own floor
+    is tsmin = DTMIN x dtstart of *CONTROL_TERMINATION (Vol I R17 p.12-558),
+    0 when DTMIN is 0 - TSLIMT is a shell-modulus floor, not a stop / delete
+    field (p.12-584), which the ed52c93 clause implied."""
+    ct = state.ctrl_termination
+    dtmin = ct.dtmin if ct is not None else 0.0
+    head = ("Tmin=0 (no lower bound): this /DT card neither stops nor "
+            "deletes on a small step (element deletion is the separate "
+            "/DT/<elem>/DEL card)")
+    if dtmin and dtmin > 0.0:
+        return (f"{head}; LS-DYNA's own floor tsmin = DTMIN x dtstart "
+                f"(*CONTROL_TERMINATION DTMIN={dtmin:g}, Vol I R17 "
+                "p.12-558) is not converted.")
+    return (f"{head}, and LS-DYNA has no floor either: *CONTROL_TERMINATION "
+            "DTMIN is 0, so its tsmin = DTMIN x dtstart is 0 (Vol I R17 "
+            "p.12-558).")
 
 
 def _positive_dt2ms_clause(state: ConversionState, ts) -> Tuple[bool, str]:
@@ -3656,53 +3874,248 @@ def _positive_dt2ms_clause(state: ConversionState, ts) -> Tuple[bool, str]:
         "9's NOT list, entry 5 'Positive DT2MS on 3-D decks').")
 
 
-def _tssfac_for_dt2ms(ts) -> Tuple[float, str]:
+#: Vol I R17 p.12-588 / 12-589, *CONTROL_TIMESTEP Remark 1: LS-DYNA's
+#: default TSSFAC depends on the deck (R14 round 10, fix round)
+_REMARK1 = "Vol I R17 p.12-588 / 12-589 Remark 1"
+
+
+def _contacts_present(state: ConversionState) -> bool:
+    """Remark 1 a's 'contacts are present': a contact k2rad reads in any
+    container, or a ``*CONTACT_`` keyword it skips (LS-DYNA still has it)."""
+    from .contacts import _deck_has_contact_record
+    return _deck_has_contact_record(state) or any(
+        str(k).upper().lstrip("*").startswith("CONTACT_")
+        for k in state.skipped_keywords)
+
+
+def _ls_default_tssfac(state: ConversionState) -> Tuple[float, str, str]:
+    """``(LS-DYNA's default TSSFAC on this deck, the keyword that sets it,
+    the rule)`` by Vol I R17 p.12-588 / 12-589 Remark 1 (R14 round 10, fix
+    round): a) contacts present and ``*CONTROL_CONTACT`` SLSFAC >= 9 ->
+    0.333, 1 <= SLSFAC < 9 -> 0.667; b) ``*INITIAL_DETONATION`` or
+    ``*BOUNDARY_NON_REFLECTING`` -> 0.667; c) 0.90 otherwise (keyword ''). The
+    one place that states the rule, read by the blank-TSSFAC words of the
+    DT2MS < 0 sentence and by :func:`_warn_ls_default_tssfac`. MEASURED: the
+    d3hsp 'time step scale factor' echo equals this rule (or the stated
+    TSSFAC) on all 353 R14 decks that print one."""
+    cc = state.ctrl_contact
+    sls = cc.slsfac if cc is not None else 0.0
+    if sls >= 1.0 and _contacts_present(state):
+        # not '*CONTROL_CONTACT SLSFAC ...': that prefix is the A9
+        # sentence's own (one per deck, counted by it)
+        return ((0.333 if sls >= 9.0 else 0.667),
+                f"*CONTROL_CONTACT with SLSFAC = {sls:g} and contacts present",
+                "a: 0.333 for SLSFAC >= 9, 0.667 for 1 <= SLSFAC < 9 when "
+                "contacts are present")
+    for kw, present in (("*INITIAL_DETONATION", state.detonations),
+                        ("*BOUNDARY_NON_REFLECTING", state.non_reflecting)):
+        if present:
+            return (0.667, kw, "b: 0.667 with *INITIAL_DETONATION or "
+                    "*BOUNDARY_NON_REFLECTING")
+    return (0.9, "", "c: 0.90 - no contact with *CONTROL_CONTACT SLSFAC "
+            ">= 1, no *INITIAL_DETONATION or *BOUNDARY_NON_REFLECTING")
+
+
+def _deck_runs_explicit(state: ConversionState) -> bool:
+    """An engine file of this deck integrates explicitly: an explicit
+    non-modal deck, or an explicit segment of an ``--imflag-curve-restart``
+    chain (an IMFLAG != 0 deck is otherwise written implicit)."""
+    if state.is_modal:
+        return False
+    if not state.is_implicit:
+        return True
+    return any(not s.implicit for s in imflag_restart_segments(state))
+
+
+def ls_tssfac_unconverted(state: ConversionState
+                          ) -> Optional[Tuple[float, str, str]]:
+    """``(LS-DYNA's default TSSFAC, the keyword, the rule)`` when this deck's
+    LS-DYNA default (Remark 1) is not 0.9 and k2rad writes no scale factor
+    for it - TSSFAC blank (or no ``*CONTROL_TIMESTEP``) with DT2MS >= 0, so
+    no ``/DT`` card, on a deck that runs explicit - else None. (DT2MS < 0
+    writes ``/DT/NODA/CST`` Tsca 0.9 and names it in that sentence; a TSSFAC
+    < 0 curve has its own sentence.)"""
+    ts = state.ctrl_timestep
+    if ts is not None and (ts.tssfac != 0.0 or ts.dt2ms < 0.0):
+        return None
+    if not _deck_runs_explicit(state):
+        return None
+    v, kw, rule = _ls_default_tssfac(state)
+    return None if v == 0.9 else (v, kw, rule)
+
+
+def _warn_ls_default_tssfac(state: ConversionState) -> None:
+    """R14 round 10, fix round (findings 6.24 (1)(b)): ONE sentence per deck
+    whose LS-DYNA default TSSFAC (Remark 1 a / b) is not 0.9 while k2rad
+    writes no ``/DT`` scale factor, so OpenRadioss steps at its own default
+    0.9 (0.67 on a routed 2-D deck, ``contrl.F:1148-1149``). Owned by the
+    keyword that sets the class. TEXT ONLY: writing the 0.667 / 0.333 would
+    move the step by 1.35x - 2.70x and no run measures it (ROADMAP, round
+    10's NOT list, entry 6). Silent where OpenRadioss's own default equals
+    LS-DYNA's to the printed digit (a routed 2-D deck's 0.67 against a
+    0.667 class: 1.00x, nothing substituted). Under a deletion floor
+    (``--dt-del``) the ``/DT .../DEL`` card carries Tsca 0.9 (0.67 on
+    ``/DT/QUAD/DEL``) - k2rad's choice for a blank TSSFAC, the same factor
+    - and the sentence says so (verification round)."""
+    if state.ls_tssfac_named or _engine_implicit(state):
+        return
+    hit = ls_tssfac_unconverted(state)
+    if hit is None:
+        return
+    v, kw, rule = hit
+    ts = state.ctrl_timestep
+    routed = axisym_routed(state)
+    orv = 0.67 if routed else 0.9
+    if f"{orv / v:.2f}" == "1.00":
+        return
+    state.ls_tssfac_named = True
+    where = ("the deck has no *CONTROL_TIMESTEP card" if ts is None else
+             "*CONTROL_TIMESTEP TSSFAC is blank")
+    tmin, source = _dt_deletion_floor(state)
+    if tmin is None:
+        how = ("k2rad writes no /DT scale factor here, so OpenRadioss steps "
+               f"at its own default {orv:g}"
+               f"{' on a 2-D deck' if routed else ''} (contrl.F:1148-1149)")
+    else:
+        card = (0.67 if routed and (state.options.dt_del or 0.0) > 0.0
+                else 0.9)
+        how = (f"the /DT .../DEL card of the deletion floor ({source}) "
+               f"carries Tsca {card:g}, k2rad's choice for a blank TSSFAC, "
+               f"and OpenRadioss steps at {orv:g}"
+               f"{' on a 2-D deck' if routed else ''}, its own default too "
+               "(contrl.F:1148-1149)")
+    state.warn(
+        f"{kw} sets LS-DYNA's default time-step scale factor on this deck: "
+        f"{where}, so LS-DYNA steps at TSSFAC = {v:g} ({_REMARK1} {rule}). "
+        f"{how} - {orv / v:.2f}x LS-DYNA's factor, a larger "
+        "explicit step and fewer cycles. Not converted: Tsca "
+        f"{v:g} would change the step and the cycle count by that factor "
+        "and no run has measured it (ROADMAP, round 10's NOT list, entry 6). "
+        "MEASURED: LS-DYNA's d3hsp echoes 'time step scale factor' 0.6670 "
+        "on the R14 decks with SLSFAC 1 / 2.5 or *INITIAL_DETONATION and "
+        "0.3330 on the one with SLSFAC 10.")
+
+
+def _tssfac_for_dt2ms(state: ConversionState, ts) -> Tuple[float, str]:
     """``(TSSFAC as written, the words for a blank one)``: the deck's TSSFAC
-    when > 0, else 0.9 - Vol I R17 p.12-589 Remark 1 c's default; the 0.333 /
-    0.667 of Remark 1 a / b (SLSFAC >= 1 contacts, *INITIAL_DETONATION,
-    *BOUNDARY_NON_REFLECTING) are not reproduced, and a TSSFAC < 0 curve is
-    not converted."""
+    when > 0, else 0.9 - k2rad's and dyna2rad's choice for a blank
+    (convertcards.cxx:166), LS-DYNA's own default only on a Remark 1 c deck;
+    the words name the deck's own default (:func:`_ls_default_tssfac`), and
+    a TSSFAC < 0 curve is not converted."""
     if ts.tssfac and ts.tssfac > 0.0:
         return ts.tssfac, ""
     if ts.tssfac < 0.0:
         return 0.9, (f"TSSFAC {ts.tssfac:g} < 0 (load curve "
                      f"{int(round(-ts.tssfac))}, not converted) -> 0.9; ")
-    return 0.9, "TSSFAC blank -> 0.9; "
+    v, kw, rule = _ls_default_tssfac(state)
+    if v == 0.9:
+        own = (f"here also LS-DYNA's own default, {_REMARK1} {rule}")
+    else:
+        own = (f"LS-DYNA's own default on this deck is {v:g} - {kw}, "
+               f"{_REMARK1} {rule} - so 0.9 is {0.9 / v:.2f}x LS-DYNA's "
+               "factor")
+    return 0.9, ("TSSFAC blank -> 0.9 (k2rad's and dyna2rad's choice, "
+                 f"convertcards.cxx:166; {own}); ")
 
 
-def _dt2ms_tmin(state: ConversionState, ts) -> Tuple[float, float, str]:
+def _tssfac_curve_sentence(state: ConversionState, ts) -> str:
+    """R14 round 10, A11 (f3): the DT2MS >= 0 deck's TSSFAC < 0 load curve
+    (Vol I R17 p.12-584 'LT.0.0: |TSSFAC| is the load curve or function
+    ID'), named with its ordinate range over 0 .. ENDTIM - the engine /DT has
+    no curve input (``freform.F:1033-1043``), so OpenRadioss steps at its
+    default scale, 0.9 in 3-D and 0.67 on a 2-D deck
+    (``contrl.F:1148-1149``). Until round 10 this path dropped the curve in
+    silence (no /DT, no text; the curve an orphan /FUNCT)."""
+    lcid = int(round(-ts.tssfac))
+    dflt = "0.67 on this routed 2-D deck" if axisym_routed(state) else "0.9"
+    cur = state.curves.get(lcid)
+    t_end = (state.ctrl_termination.endtim
+             if state.ctrl_termination is not None else 0.0)
+    rng = ""
+    if cur is not None and cur.pts:
+        # Curve.pts is ALREADY scaled and offset by handle_define_curve
+        # (((x + OFFA) SFA, (y + OFFO) SFO), writer/materials
+        # _law106_curve_points): applying SFA / SFO / OFFA / OFFO again would
+        # square the factors (the part-A-i prototype did; fixed here)
+        pts = list(cur.pts)
+        inside = [y for x, y in pts if 0.0 <= x <= t_end] if t_end > 0 else []
+        ys = inside or [y for _x, y in pts]
+        rng = (f"; the curve ranges {min(ys):g} .. {max(ys):g}"
+               + (f" over 0 .. ENDTIM {t_end:g}" if inside else
+                  " over its points"))
+    else:
+        rng = f"; load curve {lcid} is not defined in the deck"
+    return (f"*CONTROL_TIMESTEP TSSFAC={ts.tssfac:g} < 0 (load curve {lcid}, "
+            "the scale factor as a function of time, Vol I R17 p.12-584) is "
+            "NOT converted: the engine /DT has no curve input "
+            "(freform.F:1033-1043), so OpenRadioss steps at its default "
+            f"scale {dflt} (contrl.F:1148-1149){rng}. MEASURED on a "
+            "constant-0.5 curve probe: OpenRadioss stepped 1.8x the asked "
+            "step (cycle ratio 1.800, 0.9 / 0.5).")
+
+
+def _dt2ms_tmin(state: ConversionState, ts,
+                ams: bool = False) -> Tuple[float, float, str]:
     """``(Tmin, TSSFAC, the words for a blank TSSFAC)`` of a DT2MS < 0 deck:
-    the Tmin ``/DT/NODA/CST`` and ``/DT/AMS`` carry (K-41) - |DT2MS| by
-    default, TSSFAC x |DT2MS| under ``--dt2ms-tssfac-product``. The one
-    source of that number, so a text that restates it (the ``/DT/<elem>/DEL``
-    warning) cannot drift from the card."""
-    tssfac, blank = _tssfac_for_dt2ms(ts)
-    if state.options.dt2ms_tssfac_product:
+    the Tmin ``/DT/NODA/CST`` carries (K-41; R14 round 10, A4) - TSSFAC x
+    |DT2MS| by default, the minimum step LS-DYNA permits (Vol I R17
+    p.12-585) and the cell dyna2rad writes for a TSSFAC >= 0
+    (convertcards.cxx:166 / 173-174); |DT2MS| under
+    ``--no-dt2ms-tssfac-product``. *ams*: the ``/DT/AMS``
+    Tmin, |DT2MS| on both arms, as dyna2rad writes it
+    (convertcards.cxx:233-234; the engine runs DTNODAMS there, not
+    /DT/NODA/CST's nodal rule, resol.F:5847-5857, and no AMS run measured
+    the product). The one source of that number, so a text that restates it
+    (the ``/DT/<elem>/DEL`` warning) cannot drift from the card."""
+    tssfac, blank = _tssfac_for_dt2ms(state, ts)
+    if state.options.dt2ms_tssfac_product and not ams:
         return tssfac * abs(ts.dt2ms), tssfac, blank
     return abs(ts.dt2ms), tssfac, blank
 
 
 def _dt2ms_step_clause(state: ConversionState, ts, tssfac: float,
-                       blank: str, tmin: float) -> str:
-    """The step sentence of the DT2MS < 0 warnings (K-41): which Tmin was
-    written, and LS-DYNA's minimum step TSSFAC x |DT2MS| (Vol I R17
-    p.12-585) beside it."""
+                       blank: str, tmin: float, ams: bool = False) -> str:
+    """The step sentence of the DT2MS < 0 warnings (K-41; R14 round 10, A4):
+    which Tmin was written, and LS-DYNA's minimum step TSSFAC x |DT2MS| (Vol
+    I R17 p.12-585) beside it. *ams*: the ``/DT/AMS`` sentence - the AMS step
+    is computed in DTNODAMS, not with /DT/NODA/CST's nodal rule
+    (resol.F:5847-5857), so the dtnoda.F clause does not apply there."""
     d = abs(ts.dt2ms)
-    if state.options.dt2ms_tssfac_product:
-        return (f" {blank}Tmin = TSSFAC x |DT2MS| = {tssfac:g} x {d:g} = "
-                f"{tmin:g}, the minimum step LS-DYNA permits (Vol I R17 "
-                "p.12-585) [--dt2ms-tssfac-product].")
+    if ams:
+        return (f" {blank}Tmin = |DT2MS| = {tmin:g} on /DT/AMS, as dyna2rad "
+                "writes it (convertcards.cxx:233-234); LS-DYNA's minimum step "
+                f"TSSFAC x |DT2MS| = {tssfac * d:g} (Vol I R17 p.12-585) is "
+                "not applied on this route - the engine computes the AMS step "
+                "in DTNODAMS, not with /DT/NODA/CST's nodal rule "
+                "(resol.F:5847-5857), and no AMS run measured the product.")
     # Not 'the run steps at Tmin' (fix round): /DT/NODA/CST (IDTMIN(11) = 8,
     # freform.F:1057-1059) adds mass only to a node whose own step is below
     # Tmin (dtnoda.F:270-303) and clamps the global step only when it fell
     # below Tmin (dtnoda.F:654-655), so a deck whose nodal steps all exceed
     # Tmin keeps its own, larger step.
-    return (f" {blank}Tmin = |DT2MS| = {tmin:g}: every nodal step below "
-            f"{tmin:g} is lifted to it with added mass (dtnoda.F:270-303, "
-            "654-655), where LS-DYNA's minimum step is TSSFAC x |DT2MS| = "
-            f"{tssfac * d:g} (Vol I R17 p.12-585) - a floor 1/TSSFAC higher, "
-            "which takes more added mass; --dt2ms-tssfac-product writes the "
-            "product.")
+    if state.options.dt2ms_tssfac_product:
+        # R14 round 10, A4: the default since round 10. dyna2rad replaces
+        # only a 0.0 TSSFAC (convertcards.cxx:166), so its product equals
+        # this one only for a TSSFAC >= 0 (fix round, F5)
+        dyna = ("dyna2rad writes the same product, convertcards.cxx:173-174"
+                if ts.tssfac >= 0.0 else
+                "dyna2rad keeps the negative curve id as the factor of its "
+                "product, convertcards.cxx:166 / 173-174")
+        return (f" {blank}Tmin = TSSFAC x |DT2MS| = {tssfac:g} x {d:g} = "
+                f"{tmin:g}, the minimum step LS-DYNA permits (Vol I R17 "
+                f"p.12-585; {dyna}): every nodal step below "
+                f"{tmin:g} is lifted to it with added mass (dtnoda.F:257, "
+                "270-303, 654-655). MEASURED on the R14 billet forge (nt 4): "
+                "13889 cycles = LS-DYNA's 13889, KE END +16.99 -> -5.13 %, "
+                "KE RMS 8.54 -> 1.74 % of the LS peak over its 150 LS times. "
+                "--no-dt2ms-tssfac-product writes Tmin = |DT2MS| "
+                f"= {d:g}, a floor 1/TSSFAC higher.")
+    return (f" {blank}Tmin = |DT2MS| = {tmin:g} [--no-dt2ms-tssfac-product]: "
+            f"every nodal step below {tmin:g} is lifted to it with added mass "
+            "(dtnoda.F:270-303, 654-655), where LS-DYNA's minimum step is "
+            f"TSSFAC x |DT2MS| = {tssfac * d:g} (Vol I R17 p.12-585) - a "
+            "floor 1/TSSFAC higher, which takes more added mass; the default "
+            "writes the product.")
 
 
 # /DT/<elem>/DEL blocks k2rad can emit, in the order they are written. SH_3N is
@@ -3711,20 +4124,47 @@ def _dt2ms_step_clause(state: ConversionState, ts, tssfac: float,
 _DT_DEL_KINDS = ("SHELL", "SH_3N", "BRICK")
 
 
+def _dt_deletion_floor(state: ConversionState) -> Tuple[Optional[float], str]:
+    """``(Tmin, source)`` of the ``/DT/<elem>/DEL`` deletion floor this deck
+    gets, else ``(None, "")``: ``--dt-del`` first, then (only under
+    ``--no-erode-tsmin-rule``) ``ERODE=1`` with ``TSLIMT>0``. The ONE
+    decision :func:`_make_engine_dt_deletion` writes and the conditional
+    TSSFAC sentence (:func:`_warn_ls_default_tssfac`) reads."""
+    ts = state.ctrl_timestep
+    explicit = state.options.dt_del
+    if explicit is not None and explicit > 0.0:
+        return float(explicit), f"--dt-del {float(explicit):g}"
+    if (not state.options.erode_tsmin_rule and ts is not None
+            and int(ts.erode) == 1 and ts.tslimt > 0.0):
+        return (float(ts.tslimt),
+                f"*CONTROL_TIMESTEP ERODE=1 TSLIMT={ts.tslimt:g}")
+    return None, ""
+
+
 def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     """``/DT/<elem>/DEL`` — delete an element whose time step reaches Tmin.
 
-    **This card deletes elements, so k2rad never emits it uninvited.** Two
-    routes in, both explicit:
+    **This card deletes elements, so k2rad never emits it uninvited.** Since
+    R14 round 10 (A11, ``erode_tsmin_rule``) there is ONE route in, the
+    user's:
 
-    * the DECK asks: ``*CONTROL_TIMESTEP`` ``ERODE=1`` with ``TSLIMT>0``.
-      ERODE is precisely LS-DYNA's "delete elements that fall below the floor",
-      so carrying it across is faithful rather than inventive. Both fields used
-      to be sliced off the card and dropped silently;
     * the USER asks: ``--dt-del <seconds>`` (``convert(dt_del=...)``) — the
       escape hatch for a long run where one degrading element drags the global
       step toward zero and the job never finishes. It has no LS-DYNA
-      counterpart, so it is opt-in and never derived automatically.
+      counterpart, so it is opt-in and never derived automatically. On a deck
+      routed to the 2-D axisymmetric deck it writes ``/DT/QUAD/DEL`` (R14
+      round 10, A12), the one card that reaches a /QUAD (IDTMIN(2),
+      ``freform.F:1103-1106``), Tsca = TSSFAC else the 2-D default 0.67;
+    * ``*CONTROL_TIMESTEP`` ``ERODE=1`` with ``TSLIMT>0`` used to be the
+      second route (Tmin = TSLIMT). It reads the wrong LS-DYNA field: TSLIMT
+      is the shell MODULUS floor of ``*MAT`` 3 / 18 / 19 / 24 shells (Vol I
+      R17 p.12-584 / 12-585), and ERODE erodes below tsmin = DTMIN x dtstart
+      (``*CONTROL_TERMINATION`` DTMIN, p.12-558; Remark 6 p.12-590), which
+      k2rad does not compute. MEASURED on a 10-brick column (ERODE 1, TSLIMT
+      1e-7): those cards deleted 10 of 10 bricks at t 2.988e-4 where LS-DYNA's
+      closed form deletes none. The default names both fields
+      (:func:`_note_erode_tslimt`); ``--no-erode-tsmin-rule`` restores that
+      trigger byte for byte.
 
     ORDERING AGAINST MASS SCALING, which issue #78 flagged as the crux and
     feared would leave one of the two cards as dead configuration. Verified in
@@ -3755,19 +4195,18 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     if _engine_implicit(state) or state.is_modal:
         return []
     explicit = state.options.dt_del
-    tmin = None
-    source = ""
-    if explicit is not None and explicit > 0.0:
-        tmin = float(explicit)
-        source = f"--dt-del {tmin:g}"
-    elif ts is not None and int(ts.erode) == 1 and ts.tslimt > 0.0:
-        tmin = float(ts.tslimt)
-        source = f"*CONTROL_TIMESTEP ERODE=1 TSLIMT={ts.tslimt:g}"
+    # R14 round 10, A11 (default ON, --no-erode-tsmin-rule restores the
+    # ed52c93 trigger): ERODE 1 + TSLIMT > 0 is no deletion floor
+    legacy = not state.options.erode_tsmin_rule
+    tmin, source = _dt_deletion_floor(state)
+    if not legacy and ts is not None:
+        _note_erode_tslimt(state, ts)
 
     if tmin is None:
         # Nothing to emit — but SAY so when the deck asked for something and
         # only half of it is usable, instead of dropping it on the floor.
-        if ts is not None and (int(ts.erode) == 1 or ts.tslimt > 0.0):
+        if legacy and ts is not None and (int(ts.erode) == 1
+                                          or ts.tslimt > 0.0):
             state.note_recognized_not_emitted(
                 "CONTROL_TIMESTEP",
                 f"ERODE={int(ts.erode)} / TSLIMT={ts.tslimt:g} asks for element "
@@ -3776,6 +4215,31 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
                 "both, or pass --dt-del <seconds> to choose the floor "
                 "explicitly.")
         return []
+
+    if axisym_routed(state) and explicit is not None and explicit > 0.0:
+        # R14 round 10, A12: the routed 2-D deck's elements are /QUAD, whose
+        # floor is /DT/QUAD/DEL (IDTMIN(2), freform.F:1103-1106); /DT/SHELL,
+        # /SH_3N and /BRICK never reach a quad group (mqviscb.F:449 reads
+        # IDTMIN(ITY), ITY 2 for quads). Tsca: the deck's TSSFAC, else the
+        # 2-D default 0.67 (contrl.F:1148) - never the 3-D 0.9, which would
+        # change the quad step x1.343 (measured on metal-forming: 0.7445x
+        # cycles and the floor then deletes 0 quads instead of 1).
+        tsca_q = (ts.tssfac if (ts and ts.tssfac and ts.tssfac > 0.0)
+                  else 0.67)
+        state.warn(
+            f"{source} -> /DT/QUAD/DEL (Tsca={tsca_q:g}, Tmin={tmin:g}) on "
+            "this routed 2-D deck, whose elements are /QUAD (IDTMIN(2), "
+            "freform.F:1103-1106; the /DT/SHELL, /SH_3N and /BRICK cards a 3-D "
+            "deck gets never reach a quad): OpenRadioss will DELETE any quad "
+            "whose time step reaches Tmin and prints '-- DELETE SOLID "
+            "ELEMENTS <id>' for it (mqviscb.F:466-467). Tsca is the deck's "
+            "TSSFAC, else the 2-D default 0.67 (contrl.F:1148). MEASURED on "
+            "metal-forming with Tmin 3.0e-5: quad 7 deleted at t 1.562, IE END "
+            "-0.45 -> -5.41 % against LS-DYNA (500 LS times). LS-DYNA's ERODE "
+            "does not erode its 2-D elements under ERODE 1 (2Dlag.d3hsp: "
+            "'shell elements ... not active'), so k2rad writes this card only "
+            "for --dt-del.")
+        return ["/DT/QUAD/DEL", f"{_f(tsca_q)}{_f(tmin)}", "#"]
 
     tsca = ts.tssfac if (ts and ts.tssfac and ts.tssfac > 0.0) else 0.9
     warn = (f"{source} -> /DT/{{SHELL,SH_3N,BRICK}}/DEL (Tsca={tsca:g}, "
@@ -3822,15 +4286,90 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
         warn += (
             " This is the routed 2-D deck, whose elements are /QUAD: the quad "
             "floor is /DT/QUAD/DEL (IDTMIN(2), freform.F:1103-1106), which "
-            "k2rad does not write, so none of these three cards reaches them "
-            "(measured on a 6-quad probe with TSLIMT above every element's "
-            "step: 0 quads deleted; with /DT/QUAD/DEL added by hand, all 6).")
+            "k2rad writes for --dt-del only, so none of these three cards "
+            "reaches them (measured on a 6-quad probe with TSLIMT above every "
+            "element's step: 0 quads deleted; with /DT/QUAD/DEL added by hand, "
+            "all 6).")
     state.warn(warn)
 
     out: List[str] = []
     for kind in _DT_DEL_KINDS:
         out += [f"/DT/{kind}/DEL", f"{_f(tsca)}{_f(tmin)}", "#"]
     return out
+
+
+def _erode_digits(erode: int) -> List[str]:
+    """The element classes a *CONTROL_TIMESTEP ERODE value erodes, by digit
+    (Vol I R17 p.12-586 / Remark 6 p.12-590: ones = solids, thick shells and
+    SPH; tens = shells; hundreds = beams)."""
+    e = abs(int(erode))
+    out = []
+    if e % 10:
+        out.append("solid and thick-shell elements (SPH particles are "
+                   "deactivated)")
+    if (e // 10) % 10:
+        out.append("shell elements")
+    if (e // 100) % 10:
+        out.append("beam elements")
+    return out
+
+
+def _note_erode_tslimt(state: ConversionState, ts) -> None:
+    """R14 round 10, A11: name what *CONTROL_TIMESTEP TSLIMT and ERODE ask
+    for, with LS-DYNA's semantics, instead of deleting on TSLIMT.
+
+    * TSLIMT is the shell minimum time step ASSIGNMENT: the MODULI (not the
+      masses) of *MAT_PLASTIC_KINEMATIC / _POWER_LAW_PLASTICITY /
+      _STRAIN_RATE_DEPENDENT_PLASTICITY / _PIECEWISE_LINEAR_PLASTICITY shells
+      are modified so the shell step does not fall below it; with DT2MS
+      active a positive TSLIMT is disabled (10^-18), a negative one below
+      |DT2MS| is applied before the mass is scaled (Vol I R17 p.12-584 /
+      12-585). OpenRadioss has no modulus floor: not converted.
+    * ERODE: elements whose step falls below tsmin = DTMIN x dtstart
+      (*CONTROL_TERMINATION DTMIN, p.12-558; Remark 6 p.12-590) erode, by
+      digit; dtstart is LS-DYNA's own initial step, which k2rad does not
+      compute: not converted. DTMIN 0 = no tsmin, nothing erodes.
+    ONE recognized_not_emitted record (the bucket the ed52c93 half-request
+    record used; the log deduplicates on the keyword, so the two sentences
+    share it)."""
+    parts: List[str] = []
+    if ts.tslimt:
+        if ts.dt2ms and ts.tslimt > 0.0:
+            dyn = ("; with DT2MS active a positive TSLIMT is disabled, "
+                   "TSLIMT defaulting to 1e-18")
+        elif ts.dt2ms and ts.tslimt < 0.0:
+            dyn = ("; with DT2MS active a negative TSLIMT is applied before "
+                   "the mass is scaled, and set to 1e-18 if |DT2MS| exceeds "
+                   "|TSLIMT|")
+        else:
+            dyn = ""
+        parts.append(
+            f"TSLIMT={ts.tslimt:g} is LS-DYNA's shell minimum time step "
+            "assignment: the MODULI (not the masses) of *MAT_PLASTIC_KINEMATIC "
+            "/ *MAT_POWER_LAW_PLASTICITY / *MAT_STRAIN_RATE_DEPENDENT_PLASTICITY "
+            "/ *MAT_PIECEWISE_LINEAR_PLASTICITY shells are modified so that the "
+            f"shell step does not fall below it (Vol I R17 p.12-584 / 12-585{dyn})"
+            ". OpenRadioss has no modulus floor, so it is not converted; it is "
+            "NOT an erosion floor and writes no /DT/<elem>/DEL "
+            "(--no-erode-tsmin-rule restores the ed52c93 trigger ERODE 1 + "
+            "TSLIMT > 0 -> Tmin = TSLIMT).")
+    if ts.erode:
+        ct = state.ctrl_termination
+        dtmin = ct.dtmin if ct is not None else 0.0
+        cls = _erode_digits(ts.erode)
+        what = ((", the ".join(cls[:-1]) + " and the " + cls[-1])
+                if len(cls) > 1 else (cls[0] if cls else "no element class"))
+        parts.append(
+            f"ERODE={int(ts.erode)}: LS-DYNA erodes the {what} whose time step "
+            "falls below tsmin = DTMIN x dtstart, dtstart being its own "
+            "initial step (*CONTROL_TERMINATION DTMIN, Vol I R17 p.12-558; "
+            "p.12-586 / Remark 6 p.12-590) - "
+            + (f"DTMIN={dtmin:g} here, " if dtmin else
+               "DTMIN is 0 here, so LS-DYNA has no tsmin and erodes nothing; ")
+            + "not converted (k2rad does not compute dtstart). --dt-del "
+            "<seconds> writes an explicit /DT/<elem>/DEL floor.")
+    if parts:
+        state.note_recognized_not_emitted("CONTROL_TIMESTEP", " ".join(parts))
 
 
 def _make_engine_timestep(state: ConversionState) -> List[str]:
@@ -3841,8 +4380,14 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     and modal have no CFL time step to scale).
 
     DT2MS >= 0 means no mass scaling, but TSSFAC still applies and is handled by
-    _make_engine_timestep_scale below — it used to be dropped on the floor."""
+    _make_engine_timestep_scale below — it used to be dropped on the floor.
+
+    A blank TSSFAC on a deck whose LS-DYNA default is not 0.9 (Remark 1 a /
+    b) is named by _warn_ls_default_tssfac (R14 round 10, fix round; text
+    only)."""
     ts = state.ctrl_timestep
+    if not state.is_modal:
+        _warn_ls_default_tssfac(state)
     if ts is None or _engine_implicit(state) or state.is_modal:
         # round 9, B4: the --shell-in-solid-coupling re-tune's /DT/INTER/CST
         # stands alone on a deck without *CONTROL_TIMESTEP ([] otherwise)
@@ -3854,17 +4399,19 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
         # a DT2MS < 0 deck never gets it - the card is refused there)
         return (_make_engine_timestep_scale(state, ts)
                 + sis_dt_inter_lines(state))
-    # Tmin (CardStack batch, K-41): |DT2MS| by default; TSSFAC x |DT2MS|
-    # under --dt2ms-tssfac-product, the minimum step LS-DYNA permits for
-    # DT2MS < 0 (Vol I R17 p.12-585) - on /DT/NODA/CST and on /DT/AMS alike,
-    # TSSFAC being the deck's (blank -> 0.9), not AMS's 0.67 Tsca.
-    tmin, tssfac, blank = _dt2ms_tmin(state, ts)
-    step = _dt2ms_step_clause(state, ts, tssfac, blank, tmin)
+    # Tmin (CardStack batch K-41; R14 round 10, A4): TSSFAC x |DT2MS| by
+    # default on /DT/NODA/CST, the minimum step LS-DYNA permits for DT2MS < 0
+    # (Vol I R17 p.12-585), TSSFAC being the deck's (blank -> 0.9); |DT2MS|
+    # under --no-dt2ms-tssfac-product and on /DT/AMS on both arms (dyna2rad's
+    # cell, convertcards.cxx:233-234).
+    ams = _ams_is_emitted(state)
+    tmin, tssfac, blank = _dt2ms_tmin(state, ts, ams=ams)
+    step = _dt2ms_step_clause(state, ts, tssfac, blank, tmin, ams=ams)
     # On the routed 2-D deck transform_engine_lines drops the card these
     # lines build and says so itself (writer/axisym2d.py); a text about the
     # mass the card adds would be false there, so none is given.
     say = not axisym_routed(state)
-    if _ams_is_emitted(state):
+    if ams:
         # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS
         # scale factor — the PCG needs more margin than /DT/NODA/CST's 0.9. The
         # paired starter /AMS card is emitted by _make_ams, and the /DT/THERM

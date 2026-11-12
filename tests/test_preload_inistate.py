@@ -1540,8 +1540,8 @@ class PreloadWarningGateTests(unittest.TestCase):
         # HERE, and that is the point: _bar_deck() carries an
         # *INITIAL_STRESS_SECTION, and writer/mesh._solid_hg_screens turns the
         # 2026-09 LS-DYNA-default hourglass synthesis OFF for the whole deck
-        # when one is present (Isolid 1 and 2 hit ZERO OR NEGATIVE VOLUME at
-        # cycle 0 under /PRELOAD Itype=2 — see _PRELOAD_STABLE_ISOLID).
+        # when one is present (under /PRELOAD Itype=2 Isolid 1 and 2 lose the
+        # cut element right after the hold - see _PRELOAD_STABLE_ISOLID).
         deck = _bar_deck()
         out = []
         for ln in deck.splitlines():
@@ -1555,15 +1555,39 @@ class PreloadWarningGateTests(unittest.TestCase):
         self.assertIn("ISOLID = 24", msg[0])
 
     def test_isolid_warning_fires_on_an_unsupported_hourglass_choice(self):
-        # *CONTROL_HOURGLASS IHQ=6 -> Isolid 24, measured to DIVERGE after
-        # 0.7*(Tstop-Tstart) (1266 -> 1370 MPa against a 200 MPa target).
+        # *CONTROL_HOURGLASS IHQ=6 -> Isolid 24, measured to DIVERGE once the
+        # stiffness is back (1432 MPa at 0.8 dT, 1411 at 2 dT against 200; a
+        # clamped bar, round 10 B9).
         r, _s = _convert(_bar_deck(extra="*CONTROL_HOURGLASS\n" + _row(6)))
         self.assertTrue(any("emit /PROP/SOLID Isolid=24" in w
                             for w in r.warnings))
 
+    def test_the_formulation_warning_states_the_clamped_measurement(self):
+        """Round 10, B9: the stable set {5, 14, 17} was re-measured on a bar
+        clamped at both ends (two geometries, nt 4 = nt 2); the earlier
+        'not reproduced' probe was the tests' FREE bar, which collapses at
+        every Isolid. The warning says so and carries none of the retracted
+        claims."""
+        r, _s = _convert(_bar_deck(extra="*CONTROL_HOURGLASS\n" + _row(6)))
+        ws = [w for w in r.warnings if "emit /PROP/SOLID Isolid=24" in w]
+        self.assertEqual(len(ws), 1, r.warnings)
+        for needle in ("on a bar clamped at both ends (two geometries, nt 4 = "
+                       "nt 2)", "198.6 .. 201.4 MPa after Tstop",
+                       "right after Tstart + 0.1 (Tstop - Tstart)",
+                       "WARNING 1160", "BOLTST",
+                       "1432 MPa at 0.8 (Tstop - Tstart)",
+                       "A preload that nothing reacts (a free bar) collapses "
+                       "its cut elements at every Isolid"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, ws[0])
+        for gone in ("at cycle 0", "0 warnings)", "1266"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, ws[0])
+
     def test_isolid_five_is_supported_and_does_not_warn(self):
-        # IHQ 4/5 -> Isolid 5, re-measured: 200.0 MPa at t=0, 199.1 after
-        # Tstop, NORMAL TERMINATION. Warning it would be a false positive.
+        # IHQ 4/5 -> Isolid 5, re-measured on a clamped bar: 200.0 MPa through
+        # the hold, 196.8 .. 203.2 after Tstop, NORMAL TERMINATION. Warning it
+        # would be a false positive.
         r, _s = _convert(_bar_deck(extra="*CONTROL_HOURGLASS\n" + _row(4)))
         self.assertFalse(any("emit /PROP/SOLID Isolid" in w
                              for w in r.warnings))

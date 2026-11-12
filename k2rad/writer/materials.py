@@ -61,6 +61,7 @@ from ..state import (
     MatLaw3,
     MatLaw106,
     MatVacuum,
+    VacuumLightFluidPlan,
 )
 from .common import (HDR, _elform_to_isolid, _f, _i, _part_node_sets,
                      _ref_flag_materials, _spotweld_beam_pids)
@@ -207,7 +208,24 @@ def _make_materials(state: ConversionState) -> List[str]:
     # at all. It exists so the vacuum *PART resolves (ERROR 179 otherwise);
     # _resolve_ale_submaterials keeps it OUT of the /MAT/LAW51 phase list,
     # where Radioss's void is the undeclared balance of the volume fractions.
+    # R14 round 10, A7 1a: on an *ALE_MULTI-MATERIAL_GROUP deck whose one
+    # fluid partner is a LAW6 carrier the vacuum MID is written as a LAW6
+    # light-fluid copy of that fluid instead (_resolve_vacuum_light_fluid, the
+    # ONE decision; its sentence is written here, where the card is).
+    light = _resolve_vacuum_light_fluid(state)
     for vac in state.mat_vacuum.values():
+        plan = light.get(vac.mid)
+        if plan is not None and not plan.refusal:
+            lines += _emit_vacuum_light_fluid(state, vac, plan)
+            continue
+        if plan is not None:
+            state.warn(
+                f"*MAT_VACUUM {vac.mid} stays /MAT/VOID/{vac.mid} (LAW0): the "
+                "light-fluid copy (round 10, A7) is not written because "
+                f"{plan.refusal}. A LAW0 cell takes no material: whatever "
+                "advects into it is DELETED (measured on stagnation_A, where "
+                f"the copy IS written: {_A7_LAW0_DELETES} and the run stops "
+                "at cycle 832 on NEGATIVE RHO without it).")
         lines += _emit_mat_vacuum(vac)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat, state)
@@ -743,6 +761,171 @@ def _law6_carrier_mids(state: ConversionState) -> Set[int]:
     return mids
 
 
+# ── R14 round 10, A7 1a: *MAT_VACUUM -> a LAW6 light-fluid copy ─────────────
+
+#: What a LAW0 vacuum cell does to the fluid that reaches it, measured on
+#: ale/misc/impact-a/stagnation_A (the round-10 census and its critic, both
+#: nt 4): the clause both W-A7-1a sentences carry.
+_A7_LAW0_DELETES = (
+    "the water's mass falls 2.600e-4 -> 2.238e-4 t by t 1.808e-3")
+
+
+def _light_fluid_partner_law(state: ConversionState, mid: int) -> str:
+    """The emitted law of an AMMG partner that is NOT a LAW6 carrier, in the
+    words of the A7 refusal (cylinder_impact_A / _B: LAW44; ale_wavehitcol:
+    a *MAT_NULL whose *EOS_MURNAGHAN is not converted, i.e. LAW0)."""
+    if mid in state.mat_null:
+        unconv = sorted({p.eosid for p in state.parts.values()
+                         if p.mid == mid and p.eosid
+                         and p.eosid not in state.eos_cards
+                         and p.eosid not in state.eos_jwl})
+        why = (f" (its *PART EOSID {unconv[0]} names no converted *EOS_*)"
+               if unconv else "")
+        return (f"a *MAT_NULL with no converted *EOS_*{why}, so it is itself "
+                "/MAT/VOID (LAW0)")
+    if mid in state.mat_plas_kin:
+        return "*MAT_PLASTIC_KINEMATIC -> /MAT/LAW44"
+    owner = _mat_namespace_owner(state, mid)
+    if owner and owner != "another converted *MAT card":
+        return owner
+    from .mesh import _target_mat_law
+    law = _target_mat_law(state, mid)
+    return (f"written as /MAT/LAW{law}" if law is not None
+            else "a material k2rad does not emit")
+
+
+def _light_fluid_refusal(state: ConversionState, vac: MatVacuum,
+                         groups: List[List[int]], partners: List[int],
+                         carriers: Set[int]) -> str:
+    """The clause that keeps a vacuum on ``/MAT/VOID`` ("" = the copy is
+    written), screened in this order: no AMMG, not exactly one partner, a
+    partner that is not a LAW6 carrier, RO <= 0, an ``/EOS`` id clash."""
+    if not groups:
+        return "it is in no *ALE_MULTI-MATERIAL_GROUP"
+    if len(partners) != 1:
+        return (f"its *ALE_MULTI-MATERIAL_GROUP holds {len(partners)} other "
+                f"materials {partners}, not one fluid")
+    fmid = partners[0]
+    if fmid not in carriers:
+        return (f"its AMMG partner MID {fmid} is "
+                f"{_light_fluid_partner_law(state, fmid)}, not a *MAT_NULL + "
+                "*EOS_* fluid k2rad writes as /MAT/HYD_VISC")
+    if not vac.rho > 0.0:
+        return (f"its RO {vac.rho:g} is not > 0 (a /MAT/HYD_VISC needs RHO_I "
+                "> 0, ERROR 683)")
+    if vac.mid in state.eos_cards or vac.mid in state.eos_jwl:
+        return (f"an *EOS_* with id {vac.mid} is already in the deck (a "
+                "second /EOS under that id would silently replace it)")
+    # (a LAW6 carrier always has its *EOS_*: _law6_carrier_mids admits a
+    # null only through a same-id card or a *PART EOSID binding to one)
+    return ""
+
+
+def _resolve_vacuum_light_fluid(
+        state: ConversionState) -> Dict[int, VacuumLightFluidPlan]:
+    """The ONE decision of the vacuum light fluid (R14 round 10, A7 1a),
+    memoised on ``state.vacuum_light_fluid_plan``: vacuum MID -> its plan,
+    one entry per ``*MAT_VACUUM`` whose part k2rad emits with Iale >= 1,
+    ``{}`` when ``--no-vacuum-light-fluid`` or the deck has no vacuum.
+
+    THE RULE. The vacuum's ``*ALE_MULTI-MATERIAL_GROUP`` holds exactly one
+    other material and k2rad writes it as a LAW6 carrier
+    (``_law6_carrier_mids``: ``/MAT/HYD_VISC`` + ``/EOS``): the vacuum MID is
+    then written as ``/MAT/HYD_VISC`` at RHO_I = the vacuum RO with the
+    fluid's ``/EOS`` copied under the vacuum MID, its RHO_0 cell = the fluid
+    RO (the round-8 B10 layout, ``_sis_eos``: the starter takes PM(1) from
+    an ``/EOS`` RHO_0 > 0, ``hm_read_eos_gruneisen.F:117-123``), the fluid's
+    Nu and Pmin (-1e-20 where the fluid's is 0, which
+    ``hm_read_mat06.F:154`` reads as -INFINITY). A ``/MAT/VOID`` cell takes
+    no material, so the fluid advected into it is deleted and the water cell
+    beside it goes to a negative density (``srho3.F:199-213``): stagnation_A
+    / _B stop at cycle 832. Every other case keeps ``/MAT/VOID`` and is
+    named.
+
+    A DECISION ONLY: it prints nothing and draws no id, so the pre-passes
+    that ask ``mesh._target_mat_law`` what the vacuum MID emits
+    (``_resolve_ale_submaterials``, the zero-density floor) can resolve it
+    at any time; ``_make_materials`` writes the card and its sentence."""
+    if state.vacuum_light_fluid_plan is not None:
+        return state.vacuum_light_fluid_plan
+    plans: Dict[int, VacuumLightFluidPlan] = {}
+    state.vacuum_light_fluid_plan = plans
+    if not state.options.vacuum_light_fluid or not state.mat_vacuum:
+        return plans
+    from .blast_ale import _ale_part_ids, _part_pids
+    iale = set(_ale_part_ids(state))
+    carriers = _law6_carrier_mids(state)
+    for vmid, vac in sorted(state.mat_vacuum.items()):
+        vparts = sorted(p for p, part in state.parts.items()
+                        if part.mid == vmid and p in iale)
+        if not vparts:
+            continue                 # not an emitted ALE vacuum: no plan
+        groups: List[List[int]] = []
+        for mmg in state.ale_mmgs:
+            pids = [p for sid, it in mmg.entries
+                    for p in _part_pids(state, sid, it == 1)]
+            if any(p in vparts for p in pids):
+                groups.append(pids)
+        partners = sorted({state.parts[p].mid for pids in groups
+                           for p in pids
+                           if p in state.parts and state.parts[p].mid
+                           and state.parts[p].mid not in state.mat_vacuum})
+        plan = VacuumLightFluidPlan(
+            vmid=vmid, vparts=vparts, partners=partners,
+            fmid=partners[0] if len(partners) == 1 else 0)
+        plan.refusal = _light_fluid_refusal(state, vac, groups, partners,
+                                            carriers)
+        plans[vmid] = plan
+    return plans
+
+
+def _light_fluid_cells(state: ConversionState,
+                       plan: VacuumLightFluidPlan) -> Tuple[float, float]:
+    """(Nu, Pmin) of an accepted plan's copy: the partner fluid's cells
+    (``_resolve_mat_null_cells``, the ONE decision of the carrier cells),
+    Pmin -1e-20 where the fluid's is 0 (no cutoff)."""
+    nu, pmin = _resolve_mat_null_cells(state).get(plan.fmid, (0.0, 0.0))
+    return nu, (pmin or _VOID_CAVITATION_PMIN)
+
+
+def _emit_vacuum_light_fluid(state: ConversionState, vac: MatVacuum,
+                             plan: VacuumLightFluidPlan) -> List[str]:
+    """An accepted plan's card: ``/MAT/HYD_VISC/<vacuum MID>`` + the partner's
+    ``/EOS`` under the same id (RHO_0 = the fluid RO), and its sentence."""
+    eos = _carrier_eos(state, plan.fmid)
+    assert eos is not None            # _light_fluid_refusal screened it
+    fluid = state.mat_null[plan.fmid]
+    nu, pmin = _light_fluid_cells(state, plan)
+    state.warn(
+        f"*MAT_VACUUM {vac.mid} -> /MAT/HYD_VISC/{vac.mid}: a LAW6 "
+        "LIGHT-FLUID copy of its *ALE_MULTI-MATERIAL_GROUP partner, fluid MID "
+        f"{plan.fmid} (/MAT/HYD_VISC/{plan.fmid} + /EOS/{eos.kind}/"
+        f"{plan.fmid}), at RHO_I = the vacuum RO {vac.rho:g} with the /EOS "
+        f"reference density RHO_0 = the fluid RO {fluid.rho:g} and Pmin "
+        f"{pmin:g}, instead of /MAT/VOID (LAW0). A LAW0 cell takes no "
+        "material: the fluid that advects into it is DELETED (measured on "
+        f"stagnation_A: {_A7_LAW0_DELETES} at rho v A = 0.02 t/s while the "
+        "vacuum part's stays 0), and the water cell beside it then goes to a "
+        "negative density (srho3.F:199-213): NEGATIVE RHO element 260 at "
+        "cycle 832, t 0.00181 of 0.02. With the light fluid the deck runs to "
+        "its end. In LS-DYNA the vacuum is an AMMG phase with an interface; a "
+        "single-material light fluid smears the fluid into the light cells "
+        "and heats them there - MEASURED on stagnation_A (nt 4, README 9.1, n "
+        "500 LS times in (3.85e-5, 0.02]): NORMAL 9364 cycles, KE RMS 53.09 "
+        "%, IE RMS 172.71 % with this card alone; with the ALE inlet as well "
+        "KE RMS 14.40 %, IE RMS 206.79 % (see the inlet note). "
+        "--no-vacuum-light-fluid writes /MAT/VOID.")
+    return (_emit_mat_law6_carrier(vac.mid, vac.title or f"VACUUM_{vac.mid}",
+                                   vac.rho, pmin=pmin, nu=nu)
+            + _emit_eos(_sis_eos(eos, vac.mid, (vac.rho, fluid.rho))))
+
+
+def _vacuum_is_light_fluid(state: ConversionState, mid: int) -> bool:
+    """True when the ``*MAT_VACUUM`` *mid* is written as the A7 light fluid."""
+    plan = _resolve_vacuum_light_fluid(state).get(mid)
+    return plan is not None and not plan.refusal
+
+
 def _void_keyword(records: List[Tuple[int, bool]]) -> str:
     """The deck's own spelling of the void cards named in one message."""
     kinds = {is_set for _sid, is_set in records}
@@ -905,10 +1088,8 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "EOS floors its pressure at PMIN, gruneisen.F:129/132/152, "
         "eospolyno.F:104/113/125). -1e-20 is the zero-pressure cavitation "
         "limit *MAT_NULL Remark 4 (Vol II R17 p.2-190) describes for PC."
-        + overrides +
-        " The void itself is still converted as ORDINARY FLUID at full "
-        "density: its low density is NOT written (see ROADMAP), so NORMAL "
-        "TERMINATION here is not an LS-DYNA match. MEASURED at nt 4 against "
+        + overrides + _void_itself_clause(state, kw) +
+        " MEASURED at nt 4 against "
         "the LS-DYNA references (round-6 arms): quadrature_B timeout (t "
         "4.587e-3 of 0.07) -> NORMAL in 1095 cycles, IE +394.0 % / KE "
         "-40.7 % / energy error -46.5 % (KE 28-41 % low at each fifth of the "
@@ -927,6 +1108,22 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "-> Pmin -1e-20, a stated PC as stated), and --no-mat-null-pc-mu as "
         "well to keep Pmin 0.")
     return out
+
+
+def _void_itself_clause(state: ConversionState, kw: str) -> str:
+    """The floor sentence's clause on the void's own density: the round-6
+    words, unless the R14 round 10 A10 2b void copy writes a void of this
+    deck (``blast_ale._resolve_initial_void_copy``, decided in the
+    prepass; the clause then points at the coupling note)."""
+    plans = state.initial_void_copy_plan or {}
+    if any(not pl.refusal for pl in plans.values()):
+        from .blast_ale import _VOID_COPY_DENSITY_RATIO
+        return (" The void itself is written as a LAW6 copy at "
+                f"{_VOID_COPY_DENSITY_RATIO:g} x RO (round 10, A10 2b; see "
+                f"the {kw} coupling note).")
+    return (" The void itself is still converted as ORDINARY FLUID at full "
+            "density: its low density is NOT written (see ROADMAP), so "
+            "NORMAL TERMINATION here is not an LS-DYNA match.")
 
 
 def _carrier_fluid_signature(state: ConversionState, mid: int):
@@ -12109,6 +12306,21 @@ def _resolve_ale_submaterials(state: ConversionState) -> None:
                     dropped.append(
                         f"MID {mid} (*{kw}) — refused by name; see its own "
                         "warning")
+                    continue
+                if mid in state.mat_vacuum and _vacuum_is_light_fluid(
+                        state, mid):
+                    # R14 round 10, A7 1a: the vacuum MID is the LAW6
+                    # light-fluid copy on this deck - still not a phase
+                    dropped.append(
+                        f"MID {mid} (*MAT_VACUUM -> a LAW6 light-fluid copy, "
+                        "round 10, A7) — a vacuum is not a /MAT/LAW51 phase "
+                        "on either route: Radioss represents void as the "
+                        "UNDECLARED BALANCE of the phase volume fractions, not "
+                        "as a phase: LAW0 is not on fill_buffer_51.F:210's "
+                        "list and a tMID <= 0 inside the MIP rows is fatal "
+                        "(hm_read_mat51.F:608-627), while :639-646 checks only "
+                        "that the fractions SUM ABOVE 1. The vacuum *PART "
+                        "keeps its light-fluid /MAT/HYD_VISC so it resolves")
                     continue
                 if mid in state.mat_vacuum:
                     dropped.append(

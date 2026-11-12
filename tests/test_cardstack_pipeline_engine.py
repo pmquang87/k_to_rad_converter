@@ -393,20 +393,29 @@ class AddedMassWarningText(unittest.TestCase):
 # K-41  the DT2MS texts (the Tmin values: tests/test_control_timestep.py)
 # ═════════════════════════════════════════════════════════════════════════════
 
-_OLD_DT2MS0_TEXT = (
+# R14 round 10, A11: the DT2MS = 0 sentence with the corrected Tmin clause
+# (TSLIMT is LS-DYNA's shell-modulus floor, not a stop / delete field; the
+# plate's *CONTROL_TERMINATION leaves DTMIN blank, so LS-DYNA has no tsmin)
+_DT2MS0_TEXT = (
     "*CONTROL_TIMESTEP TSSFAC=0.8 (DT2MS=0, no mass scaling) -> /DT "
     "Tsca=0.8. The time-step safety factor is carried over; Tmin=0 (no "
-    "lower bound) because LS-DYNA TSLIMT is not converted, so the engine "
-    "will not stop or delete on a small step.")
+    "lower bound): this /DT card neither stops nor deletes on a small step "
+    "(element deletion is the separate /DT/<elem>/DEL card), and LS-DYNA "
+    "has no floor either: *CONTROL_TERMINATION DTMIN is 0, so its tsmin = "
+    "DTMIN x dtstart is 0 (Vol I R17 p.12-558).")
 
 
 class Dt2msTexts(unittest.TestCase):
 
     def test_default_text_states_the_step_and_names_the_flag(self):
+        # R14 round 10, A4: the product is the default
         res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9))
-        self.assertTrue(_has(res.warnings, "Tmin = |DT2MS| = 1e-06",
-                             "TSSFAC x |DT2MS| = 9e-07",
-                             "--dt2ms-tssfac-product"))
+        self.assertTrue(_has(res.warnings,
+                             "Tmin = TSSFAC x |DT2MS| = 0.9 x 1e-06 = 9e-07",
+                             "Vol I R17 p.12-585", "convertcards.cxx:173-174",
+                             "--no-dt2ms-tssfac-product writes Tmin = "
+                             "|DT2MS| = 1e-06"))
+        self.assertFalse(_has(res.warnings, "[--dt2ms-tssfac-product]"))
 
     def test_default_text_says_a_nodal_step_below_tmin_is_lifted(self):
         # /DT/NODA/CST (IDTMIN(11) = 8, freform.F:1057-1059) adds mass only to
@@ -415,7 +424,15 @@ class Dt2msTexts(unittest.TestCase):
         # whose nodal steps all exceed Tmin keeps its own larger step - 'the
         # run steps at Tmin' overstated it (fix round)
         res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9))
-        self.assertTrue(_has(res.warnings, "Tmin = |DT2MS| = 1e-06",
+        self.assertTrue(_has(res.warnings, "Tmin = TSSFAC x |DT2MS|",
+                             "every nodal step below 9e-07 is lifted to it",
+                             "a floor 1/TSSFAC higher"))
+        self.assertFalse(_has(res.warnings, "the run steps at 9e-07"))
+        # the opt-out keeps the ed52c93 Tmin and its sentence
+        res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9),
+                               dt2ms_tssfac_product=False)
+        self.assertTrue(_has(res.warnings, "Tmin = |DT2MS| = 1e-06 "
+                             "[--no-dt2ms-tssfac-product]",
                              "every nodal step below 1e-06 is lifted to it",
                              "a floor 1/TSSFAC higher"))
         self.assertFalse(_has(res.warnings, "the run steps at 1e-06"))
@@ -438,14 +455,19 @@ class Dt2msTexts(unittest.TestCase):
                                      "curve 3, not converted) -> 0.9; "))
                 self.assertFalse(_has(res.warnings, "TSSFAC blank"))
 
-    def test_flag_text_states_the_product(self):
-        for kw in ({}, {"ams": True}):
+    def test_the_ams_text_keeps_dt2ms_on_both_arms(self):
+        # R14 round 10, A4 (D12): /DT/AMS keeps Tmin = |DT2MS| whatever
+        # the lever, as dyna2rad writes it; the sentence says why
+        for kw in ({}, {"dt2ms_tssfac_product": False}):
             with self.subTest(**kw):
                 res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9),
-                                       dt2ms_tssfac_product=True, **kw)
+                                       ams=True, **kw)
                 self.assertTrue(_has(
-                    res.warnings, "Tmin = TSSFAC x |DT2MS| = 0.9 x 1e-06 = "
-                    "9e-07", "[--dt2ms-tssfac-product]"))
+                    res.warnings, "Tmin = |DT2MS| = 1e-06 on /DT/AMS",
+                    "convertcards.cxx:233-234", "TSSFAC x |DT2MS| = 9e-07",
+                    "resol.F:5847-5857"))
+                self.assertFalse(_has(res.warnings, "Tmin = TSSFAC x "
+                                      "|DT2MS| = 0.9 x 1e-06"))
 
     def test_blank_tssfac_is_named_as_0_9(self):
         res, _s, _e = _convert(_plate(dt2ms=-1.0e-6),
@@ -454,14 +476,20 @@ class Dt2msTexts(unittest.TestCase):
                              "Tmin = TSSFAC x |DT2MS| = 0.9 x 1e-06 = 9e-07"))
 
     def test_dt_del_coexistence_text_states_the_written_tmin(self):
-        # ERODE 1 + TSLIMT > 0 beside DT2MS < 0: the /DT/<elem>/DEL warning
-        # restates the /DT/NODA/CST Tmin - the one actually written
-        for flag, tmin, cell in ((False, "1e-06", 1.0e-6),
-                                 (True, "9e-07", 9.0e-7)):
-            with self.subTest(flag=flag):
+        # a /DT/<elem>/DEL floor beside DT2MS < 0 (--dt-del; or ERODE 1 +
+        # TSLIMT > 0 under --no-erode-tsmin-rule, round 10 A11): the
+        # warning restates the /DT/NODA/CST Tmin - the one actually written
+        for flag, tmin, cell, deck_kw, kw in (
+                (False, "1e-06", 1.0e-6, {}, {"dt_del": 1.0e-9}),
+                (True, "9e-07", 9.0e-7, {}, {"dt_del": 1.0e-9}),
+                (False, "1e-06", 1.0e-6, {"tslimt": 1.0e-9, "erode": 1},
+                 {"erode_tsmin_rule": False}),
+                (True, "9e-07", 9.0e-7, {"tslimt": 1.0e-9, "erode": 1},
+                 {"erode_tsmin_rule": False})):
+            with self.subTest(flag=flag, **kw):
                 res, _s, eng = _convert(
-                    _plate(dt2ms=-1.0e-6, tssfac=0.9, tslimt=1.0e-9,
-                           erode=1), dt2ms_tssfac_product=flag)
+                    _plate(dt2ms=-1.0e-6, tssfac=0.9, **deck_kw),
+                    dt2ms_tssfac_product=flag, **kw)
                 rows = _block(eng, "/DT/NODA/CST/0")
                 self.assertAlmostEqual(float(rows[0].split()[1]), cell,
                                        places=15)
@@ -477,10 +505,13 @@ class Dt2msTexts(unittest.TestCase):
         # the --ams note (fix round; measured with the reviewer's
         # probe_2d_del.py: '/DT/NODA/CST in engine: False' beside 'It
         # coexists with /DT/NODA/CST (Tmin=0.0001)')
+        # (round 10, A11: ERODE 1 + TSLIMT > 0 writes these cards only
+        # under --no-erode-tsmin-rule)
         for kw in ({}, {"ams": True}):
             with self.subTest(**kw):
                 res, _s, eng = _convert(
-                    _ax15(-1.0e-4, tslimt=1.0e-9, erode=1), **kw)
+                    _ax15(-1.0e-4, tslimt=1.0e-9, erode=1),
+                    erode_tsmin_rule=False, **kw)
                 self.assertNotIn("/DT/NODA/CST", eng)
                 self.assertNotIn("/DT/AMS", eng)
                 self.assertIsNotNone(_block(eng, "/DT/SHELL/DEL"))
@@ -492,10 +523,19 @@ class Dt2msTexts(unittest.TestCase):
                                       "/DT/NODA/CST"))
                 self.assertFalse(_has(res.warnings, "ERODE=1",
                                       "NOTE --ams"))
-        # off the 2-D route the same fixture keeps the coexistence text
+        # off the 2-D route the same fixture keeps the coexistence text, with
+        # the written Tmin: TSSFAC blank -> 0.9, so 0.9 x 1e-4 = 9e-05 since
+        # round 10 (A4; 0.0001 under --no-dt2ms-tssfac-product)
         res, _s, eng = _convert(_ax15(-1.0e-4, tslimt=1.0e-9, erode=1),
-                                axisymmetric_2d=False)
+                                axisymmetric_2d=False,
+                                erode_tsmin_rule=False)
         self.assertIsNotNone(_block(eng, "/DT/NODA/CST/0"))
+        self.assertTrue(_has(res.warnings, "It coexists with /DT/NODA/CST "
+                             "(Tmin=9e-05)"))
+        res, _s, eng = _convert(_ax15(-1.0e-4, tslimt=1.0e-9, erode=1),
+                                axisymmetric_2d=False,
+                                erode_tsmin_rule=False,
+                                dt2ms_tssfac_product=False)
         self.assertTrue(_has(res.warnings, "It coexists with /DT/NODA/CST "
                              "(Tmin=0.0001)"))
         self.assertFalse(_has(res.warnings, "On this routed 2-D deck no "
@@ -511,10 +551,14 @@ class Dt2msTexts(unittest.TestCase):
         # above every element's step): as written 0 of 6 quads deleted,
         # engine echo 'QUAD MINIMUM TIME STEP 0.000000'; with /DT/QUAD/DEL
         # added by hand 6 of 6 deleted
+        # (round 10: the ERODE 1 + TSLIMT > 0 trigger is the
+        # --no-erode-tsmin-rule arm, A11; --dt-del on this deck writes
+        # /DT/QUAD/DEL itself, A12 - test_dt_del_on_the_routed_2d_deck_*)
         for dt2ms in (-1.0e-4, 1.0e-4):
             with self.subTest(dt2ms=dt2ms):
                 res, st, eng = _convert(
-                    _ax15(dt2ms, tslimt=1.0e-9, erode=1))
+                    _ax15(dt2ms, tslimt=1.0e-9, erode=1),
+                    erode_tsmin_rule=False)
                 self.assertIn("/QUAD/1", st.splitlines())
                 self.assertIsNone(_block(eng, "/DT/QUAD/DEL"))
                 self.assertTrue(_has(res.warnings, "ERODE=1 TSLIMT=1e-09",
@@ -523,9 +567,48 @@ class Dt2msTexts(unittest.TestCase):
                                      "none of these three cards reaches "
                                      "them", "0 quads deleted"))
 
-    def test_dt2ms_zero_keeps_the_old_text_byte_for_byte(self):
+    def test_dt_del_on_the_routed_2d_deck_writes_the_quad_floor(self):
+        # R14 round 10, A12: --dt-del on the routed 2-D deck writes
+        # /DT/QUAD/DEL (IDTMIN(2), freform.F:1103-1106) and none of the 3-D
+        # cards; Tsca = the deck's TSSFAC (here blank) else the 2-D default
+        # 0.67 (contrl.F:1148), never 0.9
+        for dt2ms in (-1.0e-4, 1.0e-4):
+            with self.subTest(dt2ms=dt2ms):
+                res, _st, eng = _convert(_ax15(dt2ms), dt_del=3.0e-5)
+                self.assertEqual(_block(eng, "/DT/QUAD/DEL"),
+                                 ["                0.67        3.000000E-05"])
+                for kind in ("SHELL", "SH_3N", "BRICK"):
+                    self.assertIsNone(_block(eng, f"/DT/{kind}/DEL"))
+                self.assertTrue(_has(res.warnings, "--dt-del 3e-05 -> "
+                                     "/DT/QUAD/DEL (Tsca=0.67, Tmin=3e-05)",
+                                     "mqviscb.F:466-467", "contrl.F:1148",
+                                     "IE END -0.45 -> -5.41 %"))
+        # a stated TSSFAC is the quad card's Tsca
+        old = "*CONTROL_TIMESTEP\n" + _t9._f10(0.0, 0.0, 0, 0.0, -1.0e-4)
+        deck = _ax15(-1.0e-4)
+        self.assertIn(old, deck)
+        deck = deck.replace(old, "*CONTROL_TIMESTEP\n"
+                            + _t9._f10(0.0, 0.5, 0, 0.0, -1.0e-4))
+        _r, _st, eng = _convert(deck, dt_del=3.0e-5)
+        self.assertEqual(_block(eng, "/DT/QUAD/DEL"),
+                         ["                 0.5        3.000000E-05"])
+
+    def test_the_default_erode_and_tslimt_write_no_floor(self):
+        # R14 round 10, A11: ERODE 1 + TSLIMT > 0 is no deletion floor on
+        # the routed 2-D deck either - no /DT/*/DEL at all, both fields named
+        # in ONE recognised-not-emitted record
+        res, _st, eng = _convert(_ax15(-1.0e-4, tslimt=1.0e-9, erode=1))
+        for kind in ("QUAD", "SHELL", "SH_3N", "BRICK"):
+            self.assertIsNone(_block(eng, f"/DT/{kind}/DEL"))
+        rne = [m for _k, m in res.recognized_not_emitted]
+        self.assertTrue(_has(rne, "TSLIMT=1e-09", "MODULI (not the masses)",
+                             "p.12-584 / 12-585", "--no-erode-tsmin-rule"))
+        self.assertTrue(_has(rne, "ERODE=1", "tsmin = DTMIN x dtstart",
+                             "p.12-558", "--dt-del"))
+
+    def test_dt2ms_zero_text_byte_for_byte(self):
         res, _s, _e = _convert(_plate(dt2ms=0.0, tssfac=0.8))
-        self.assertIn(_OLD_DT2MS0_TEXT, res.warnings)
+        self.assertIn(_DT2MS0_TEXT, res.warnings)
 
     def test_positive_dt2ms_text_is_honest(self):
         res, _s, eng = _convert(_plate(dt2ms=1.0e-6, tssfac=0.8))

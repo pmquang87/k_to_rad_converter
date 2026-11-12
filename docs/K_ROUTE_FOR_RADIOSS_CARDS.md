@@ -43,7 +43,7 @@ them after the batch merges.
 | `/TITLE` | `*TITLE` | `writer/output.py` | as hand-written |
 | `/MAT/ELAST` | `*MAT_ELASTIC` (MID RO E PR) | `writer/materials.py` | cell for cell |
 | `/PROP/SOLID` (TET4) | `*SECTION_SOLID` ELFORM 10, tets as 4-node or degenerate 8-node `*ELEMENT_SOLID` rows | `writer/mesh.py` | Isolid 1 on an all-tet section (K-30, default ON, `--no-tet-isolid1`); run 27 wrote 0. Inert for a 4-node tet: Isolid 14, 1 and 0 gave bit-identical results on a LAW1 tet cantilever (D5-16). ELFORM 13: see 4.4 |
-| `/PROP/SHELL` (Ishell 12, N 5, Thick 0.35, Ashear, Idrill 1) | `*SECTION_SHELL` ELFORM 16 (Ishell 12 by default), NIP, T1 | `writer/mesh.py` `_emit_prop_shell` | Idrill is always 0: see 4.1. A blank NIP gives N 2: see 3.6. On a LAW1 (`*MAT_ELASTIC`) section N is 0 (K-31, default ON, `--no-law1-shell-global-n`) - the starter switches such a group to N 0 itself (WARNING 1084). Ashear is always written 0, which the starter reads as 5/6 (`hm_read_prop01.F:244`; 0 again for N 1, `:258`), so run 27's 0.8333 to four digits; `*SECTION_SHELL` SHRF is NOT converted to Ashear (deferred to round 10; K-32 logs a note when a stated SHRF is not 5/6) |
+| `/PROP/SHELL` (Ishell 12, N 5, Thick 0.35, Ashear, Idrill 1) | `*SECTION_SHELL` ELFORM 16 (Ishell 12 by default), NIP, T1 | `writer/mesh.py` `_emit_prop_shell` | Idrill is always 0: see 4.1. A blank NIP gives N 2: see 3.6. On a LAW1 (`*MAT_ELASTIC`) section N is 0 (K-31, default ON, `--no-law1-shell-global-n`) - the starter switches such a group to N 0 itself (WARNING 1084). Ashear carries `*SECTION_SHELL` SHRF since R14 round 10 (A1, default ON, `--no-shrf-ashear` writes 0 everywhere): a blank / 0 as LS-DYNA's default 1.0, 0 < SHRF <= 1 as stated, within 0.005 of 5/6 the cell 0, which the starter reads as its own 5/6 (`hm_read_prop01.F:244`; 0 again for N 1, `:258`) - so run 27's 0.8333 keeps the cell 0, 5/6 to four digits; NIP-1, membrane ELFORM 5 / 9 and 2-D sections keep 0 (on the N-1 property of a triangle-only NIP-1 section the starter zeroes Ashear itself, `hm_read_prop01.F:246-259`, and the engine integrates no transverse shear, `c3coef3.F:134-137`; a NIP-1 section kept at N 2 runs at 5/6), each kept or substituted value named in the log |
 | `/NODE` | `*NODE` | `writer/mesh.py` | cell for cell |
 | `/PART` | `*PART` | `writer/mesh.py` | cell for cell |
 | `/TETRA4` | `*ELEMENT_SOLID` (tets) | `writer/mesh.py` | cell for cell (first row of run 27 and of the reduced `.k` deck identical) |
@@ -54,6 +54,10 @@ them after the batch merges.
 | `/BCS` | `*BOUNDARY_SPC_NODE` / `_SET`; on a rigid body `*MAT_RIGID` CMO 1 CON1 / CON2, or the CNRB `_SPC` CON1 / CON2 | `writer/loads.py`, `writer/rbody.py` | cell for cell (`111 111` housing; `111 110` axis from CON1 7 CON2 4). \|CMO\| = 2 is not converted: see 3.2 |
 | `/IMPDISP` on a node group | `*BOUNDARY_PRESCRIBED_MOTION_SET` VAD 2 | `writer/loads.py` | cell for cell |
 | `/IMPDISP` on an `/RBODY` main node (X, Y, ZZ) | `*BOUNDARY_PRESCRIBED_MOTION_RIGID` VAD 2, DOF 1-3 / 5-7 | `writer/loads.py` | the drive acts at the body's centre of mass: see 3.1 |
+| `/EBCS/INLET/VP` + its `/SURF/SEG` (not in run 27) | `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` VAD 0, DOF 1-3, whose nodes cover boundary faces of an ELFORM 11 / 12 (Iale) mesh (R14 round 10, A7 1b, default ON; `--no-ale-inflow-ebcs` keeps the `/IMPVEL`) | `writer/loads.py` `_pm_inlet_decision`, `writer/blast_ale.py` `ale_inlet_lines` | the faces in outward node order; vel_flag 1, the DOF's component = the row's own `/FUNCT` x its Fscale, the other two 0; one material row: volume fraction 1, density = the face bricks' fluid RHO_I, pressure 0 (`radioss2019/LOADS/inlet.cfg:165-205`). The EBCS imposes the velocity on its nodes every cycle (`ebcs8_inlet.F90:693-716`); an `/IMPVEL` on an Eulerian ALE face moves the nodes and admits no material (`aflux3.F:488-524`), where LS-DYNA's own prescribed-velocity face admits the inflow and lets it out again at the open faces of its Eulerian mesh (`*CONTROL_ALE` EBC 0), which OpenRadioss closes - the measured mass balance is the conversion sentence's (`writer/blast_ale._A7_INLET_MEASURED`) and ROADMAP's round-10 'Found by the verification round' item (a). Measured on the 3-brick coupon `tests/fixtures/round10/r10_ale_inlet_coupon.k` (starter 0 ERROR(S), `NUMBER OF SEGMENTS FOUND 1`, engine NORMAL TERMINATION) and on stagnation_A (the README's round-10 options) |
+| a LAW6 void copy `/MAT/HYD_VISC` + `/EOS`, its own `/GRBRIC/PART` and a second `/INTER/TYPE18` (not in run 27) | an `*INITIAL_VOID_PART` / `_SET` part in the fluid (master) set of a `*CONSTRAINED_LAGRANGE_IN_SOLID` coupling, no `*ALE_REFERENCE_SYSTEM_*` card (R14 round 10, A10 2b, default ON; `--no-initial-void-copy` writes the void at full density) | `writer/blast_ale.py` `_resolve_initial_void_copy`, `_make_fsi_coupling` | RHO_I = 1e-3 x RO (a numerical floor of this converter, not a value LS-DYNA states), the fluid's `/EOS` with RHO_0 = RO, through the round-8 B10 maps (a copy MID when another part shares the `*MAT_NULL`); the fluid's `/GRBRIC/PART` loses the void part, which gets its own group and interface at the fluid's Stfval x 1e-3, the same surface, Gap and times. Measured on quadrature_B (the README's round-10 options) |
+| `/INTER/TYPE18` Stfval = PFAC x m_node / dt0^2 (not in run 27) | `*CONSTRAINED_LAGRANGE_IN_SOLID` card 2 PFAC (> 0; 0 = 0.1) under the opt-in `--clis-pfac-stiffness` (R14 round 10, A10 2a) | `writer/blast_ale.py` `_clis_pfac_stiffness`, `clis_dt0_estimate` | m_node = the median lumped nodal mass of the coupled fluid, dt0 = Tsca x the starter's smallest element step estimated from the deck (`dtel.F` / `cndleni.F`; `tests/fixtures/round10/r10_clis_dt0*.k`); a negative PFAC (a curve) and a deck with a LAW0 `*MAT_VACUUM` are refused |
+| `/MAT/HYD_VISC` + `/EOS` under a `*MAT_VACUUM` MID (not in run 27) | `*MAT_VACUUM` in an `*ALE_MULTI-MATERIAL_GROUP` whose one other material is a `*MAT_NULL` + `*EOS_*` fluid (R14 round 10, A7 1a, default ON; `--no-vacuum-light-fluid` writes `/MAT/VOID`) | `writer/materials.py` `_resolve_vacuum_light_fluid` | RHO_I = the vacuum RO; the fluid's `/EOS` copied under the vacuum MID with its RHO_0 cell = the fluid RO, so the starter's reference density PM(1) stays the fluid's (`hm_read_eos_gruneisen.F:117-123`); Pmin -1e-20; the fluid's Nu |
 | `/GRAV` | `*LOAD_BODY_Z` (LCID, SF 9810) + `*LOAD_BODY_PARTS` | `writer/loads.py` | better than hand-written: one data line, Fscale_Y -9810. Run 27's second data line was not read, so its gravity was 1 mm/s² (starter echo SCALE_Y 1.0) |
 | `/DAMP` Alpha, grnod, Tstart / Tstop | `*DAMPING_PART_MASS` (box curve = a settle window) or `*DAMPING_GLOBAL` (VALDMP, or its LCID curve) | `writer/loads.py` | Alpha cell for cell; a box curve becomes one alpha-only `/DAMP` per level with its Tstart / Tstop (K-20, default ON; `--no-damping-curve-window` writes one `/DAMP` for the whole run). Measured (6.7): alpha 200, Tstart 0, Tstop 0.00050005. Beta: see 4.2 (`*DAMPING_PART_STIFFNESS` only; the `_SET` form is skipped) |
 | `/SURF/PART/EXT` (tooling) | written by k2rad for a contact on solid parts | `writer/common.py` `_emit_surf_part` | cell for cell |
@@ -74,7 +78,7 @@ them after the batch merges.
 | `/ANIM/DT` | `*DATABASE_BINARY_D3PLOT` DT | `writer/assembly.py` | cell for cell |
 | `/ANIM/VECT/DISP`, `/ANIM/VECT/VEL`, `/ANIM/VECT/CONT`, `/ANIM/ELEM/VONM`, `/ANIM/BRICK/TENS/STRESS` | always written | `writer/assembly.py` `_make_engine_output` | k2rad's fixed list is a superset of run 27's |
 | `/ANIM/SHELL/TENS/STRESS/ALL` | `*DATABASE_EXTENT_BINARY` MAXINT > 3 (K-42; `--no-maxint-stress-all` writes no such line) | `handlers.py` `handle_database_extent_binary` (card 1 field 3, blank = 3), `writer/assembly.py` | measured (6.7): MAXINT 5 writes `/ANIM/SHELL/TENS/STRESS/ALL` right after MEMB / UPPER / LOWER, and the log names it. A blank MAXINT (= 3) writes MEMB, UPPER and LOWER only; a MAXINT below -3 is named in the log and not converted. The engine runs the line to NORMAL TERMINATION (6.5; 6.8, the rigid-tooling CardStack run) |
-| `/DT/NODA/CST` Tsca, Tmin | `*CONTROL_TIMESTEP` TSSFAC, DT2MS < 0 | `writer/assembly.py` `_make_engine_timestep` | Tmin = \|DT2MS\| by default; `--dt2ms-tssfac-product` writes TSSFAC x \|DT2MS\|, LS-DYNA's minimum step (6.4). Read the added mass: see 3.7 |
+| `/DT/NODA/CST` Tsca, Tmin | `*CONTROL_TIMESTEP` TSSFAC, DT2MS < 0 | `writer/assembly.py` `_make_engine_timestep` | Tmin = TSSFAC x \|DT2MS\| by default since round 10 (LS-DYNA's minimum step, 6.4; `/DT/AMS` keeps \|DT2MS\|); `--no-dt2ms-tssfac-product` writes \|DT2MS\|. Read the added mass: see 3.7 |
 | `/STOP` (added-mass limit) | `*CONTROL_TERMINATION` ENDMAS + `--stop-added-mass` (K-40) | `writer/assembly.py` `_make_engine_stop` | `0. ENDMAS/100 0. 1 1 0`: Mmax is a RATIO, ENDMAS a percent (6.3). Only on a DT2MS < 0 deck with `/DT/NODA/CST`: an ENDMAS < 0 curve, `--ams` and the routed 2-D deck get a warning and no `/STOP` (6.7). A stopped run ends NORMAL TERMINATION then USER BREAK with engine exit 0 and writes its engine restart file although the deck says `/RFILE/OFF` (6.3): read the listing, not the exit code |
 | `/PRINT/-2000` | `--print-every 2000`, or `*CONTROL_OUTPUT` IKEDIT 2000 on a deck WITHOUT `*DATABASE_GLSTAT` (K-42) | `writer/assembly.py` `_print_cadence` | LS-DYNA ignores IKEDIT when glstat is written, and so does k2rad; else `/PRINT/-1` (6.5) |
 | `/PARITH/ON` | `*CONTROL_PARALLEL` CONST 1 | `writer/output.py` | parith is on by default anyway: `/ANALY` Iparith 0 sets IPARI0 1 (`hm_read_analy.F`), and an engine deck without `/PARITH` takes it (`rdresa.F:282`) |
@@ -171,7 +175,8 @@ every non-elastic section.
 ### 3.7 Mass scaling: read the added mass, not the starter's 'ADDED MASS'
 
 `*CONTROL_TIMESTEP` DT2MS < 0 becomes `/DT/NODA/CST/0` Tsca = TSSFAC (blank ->
-0.9; 6.7), Tmin = |DT2MS|. OpenRadioss then adds mass to every node whose own
+0.9; 6.7), Tmin = TSSFAC x |DT2MS| (round 10; `--no-dt2ms-tssfac-product`:
+|DT2MS|). OpenRadioss then adds mass to every node whose own
 step is below Tmin and lifts that step to Tmin (`dtnoda.F:270-303`; the global step
 is clamped up to Tmin only when it fell below it, `:654-655`). A deck whose
 nodal steps all stay above Tmin keeps its own, larger step and gets no added
@@ -190,10 +195,14 @@ at cycle 0); the 0.07 % quoted in troubles.md did not describe that run. State
 `*CONTROL_TERMINATION` ENDMAS and pass `--stop-added-mass`: the run then stops
 at the limit (6.3). Make tooling `*MAT_RIGID` instead of mass-scaling its
 CAD micro-edges (D5-2: rigid tooling gave the same 1.89e-6 s step with zero
-added mass). `--dt2ms-tssfac-product` makes the step LS-DYNA's (6.4).
+added mass). Since round 10 the step is LS-DYNA's by default (6.4).
 
 Two limits of these readings, measured by the end-to-end proof (6.8; the first
-mechanism corrected on 2026-11-01 from the starter source):
+mechanism corrected on 2026-11-01 from the starter source). Every figure in
+them was measured before round 10, at Tmin = |DT2MS| (the 2-card benchmark
+1.5e-7, the CardStack variants 2.0e-6); since round 10 the default writes
+Tmin = TSSFAC x |DT2MS| (1.35e-7 and 1.8e-6 on those decks), and the figures
+were not re-measured at it:
 
 * On a deck with rigid bodies the starter's estimate can be too high, and not
   because of the secondary nodes: `inirby.F:876-883` lumps each rigid body's
@@ -316,7 +325,7 @@ described in D2-8 / D5-12. This tree has every one of them (re-measured on
 | `*CONTROL_UNITS` -> `/BEGIN` labels | K-0P | done: `Mg mm s` from `mm sec mtrc_ton`; a `--units` that disagrees is written and warned |
 | damping curve -> `/DAMP` time windows | K-20 | done, default ON (`--no-damping-curve-window`): alpha 200, Tstart 0, Tstop 0.00050005 |
 | finite rigid-wall footprint lint | K-21 | done: a `_FINITE` face over none of its 9 nodes is named |
-| DT2MS < 0: Tmin = TSSFAC x \|DT2MS\| | K-41 | done, opt-in `--dt2ms-tssfac-product`: 4.5e-6 for 0.9 x 5e-6 |
+| DT2MS < 0: Tmin = TSSFAC x \|DT2MS\| | K-41 | done, default since round 10 (`--no-dt2ms-tssfac-product`): 4.5e-6 for 0.9 x 5e-6 |
 | ENDMAS -> `/STOP` Mmax | K-40 | done, opt-in `--stop-added-mass`: `/STOP 0. 0.05 0. 1 1 0` for ENDMAS 5 |
 | `/PRINT/-N` from `--print-every` / IKEDIT | K-42 | done: IKEDIT 50 without glstat gives `/PRINT/-50`, with glstat `/PRINT/-1`; `--print-every 2000` gives `/PRINT/-2000` |
 | MAXINT > 3 -> `/ANIM/SHELL/TENS/STRESS/ALL` | K-42 (the handler read came later in the batch) | done, default ON (`--no-maxint-stress-all`): MAXINT 5 writes it; blank (= 3) and -5 do not, -5 is named |
@@ -387,7 +396,7 @@ density cell neither (MAS.ERR 0.000, 11 cycles): k2rad warns there and writes no
 12501 cycles, end KE +16.99 % against LS-DYNA; with the flag 1.08e-7 -> echo
 1.08e-7, 13890 cycles, end KE -5.13 %; end IE +0.135 % in both. On the shell
 card of 6.3 the flag cuts the added mass at cycle 0 from 1.371e-5 to 1.035e-5
-Mg.
+Mg. (Since round 10 this is the default.)
 
 **6.5 `/PRINT/-N`** (the card of 6.3, 401 cycles): `--print-every 100` prints
 cycles 0, 100, .., 400; IKEDIT 50 without `*DATABASE_GLSTAT` prints every 50th
@@ -437,6 +446,10 @@ other probes:
   sections; N 0 on the elastic one (`--no-law1-shell-global-n`: 5), N 2 on the
   blank NIP; the SHRF 1.0 is named. `/TETRA4` and `/PROP/SOLID` Isolid 1,
   Itetra4 0 on both tet sections, in s1 and s2 (`--no-tet-isolid1`: Isolid 14).
+  (Measured before R14 round 10. Since its A1 the SHRF 1.0 section is written
+  Ashear 1 - the factor is carried, so it is no longer named - and the 0.8333
+  one keeps 0, inside the 0.005 window around 5/6; `--no-shrf-ashear` writes
+  the bytes above and names the 1.0.)
 * e1: one 2 x 2 shell card; `*CONTROL_UNITS` mm sec mtrc_ton, ENDTIM 0.002,
   ENDMAS 5, DT2MS -5e-6, `*CONTROL_PARALLEL` CONST 1, IKEDIT 50, MAXINT 5, no
   glstat. `/BEGIN` Mg mm s, `/RUN` 0.002, `/PARITH/ON`, `/TFILE` 2e-6,
@@ -521,7 +534,8 @@ tree, the starter and the engine:
   starter 0 ERROR(S) and engine NORMAL TERMINATION. The echoes show TYPE7
   MINIMUM GAP 0.40 (= |SST|, K-12) beside 0.21 (= (SST + MST)/2), the
   two-surface TYPE25 of `--s2s-type25` (k25s) and Inacti 6 from `--inter-inacti`
-  (k7i6). The k25s log prints the one-way TYPE7 warning beside the TYPE25 line.
+  (k7i6). The k25s log prints the one-way TYPE7 warning beside the TYPE25 line
+  (withdrawn since 2026-11-07, master PR #147).
   At DT2MS -1.5e-7 the audit's only FLAG was the mass forecast (1.06x) at
   MAS.ERR 0.000 (3.7); at DT2MS 0 `run_or.ps1 -Both -Strict` exits 0 (r4).
 * The reduced CardStack decks (folder `cs2`): a (all-parts TYPE25) and b (card

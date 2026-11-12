@@ -452,7 +452,16 @@ class InitialVoidFloorTests(unittest.TestCase):
         self.assertFalse(any("NOT VALID" in w for w in result.warnings))
 
     def test_the_TYPE18_coupled_void_gets_the_rewritten_warning(self):
-        result, starter, _e = _convert(_void_deck(coupled=True))
+        # R14 round 10: A10 2b writes the void copy on a CLIS-coupled
+        # *INITIAL_VOID deck by default, and its sentence replaces this one
+        # there; the full-density sentence is --no-initial-void-copy's
+        result, _s, _e = _convert(_void_deck(coupled=True))
+        self.assertFalse(any("NOT VALID" in w for w in result.warnings))
+        self.assertTrue(any("LAW6 COPY" in w and "k2rad writes the "
+                            "cavitation floor" in w
+                            for w in result.warnings), result.warnings)
+        result, starter, _e = _convert(_void_deck(coupled=True),
+                                       initial_void_copy=False)
         self.assertIn("/INTER/TYPE18/", starter)
         self.assertEqual(_pmin_row(starter, 1), _FLOOR_ROW)
         self.assertEqual(_pmin_row(starter, 2), _FLOOR_ROW)
@@ -468,7 +477,10 @@ class InitialVoidFloorTests(unittest.TestCase):
     def test_the_coupled_void_warning_names_a_refused_floor(self):
         result, _s, _e = _convert(_void_deck(coupled=True),
                                   initial_void_floor=False)
-        fsi = [w for w in result.warnings if "NOT VALID" in w]
+        # R14 round 10 (A10 2b writes the void copy on a CLIS-coupled
+        # *INITIAL_VOID deck): the copy's sentence carries the floor clause
+        fsi = [w for w in result.warnings
+               if "is the ALE fluid group of the emitted /INTER/TYPE18" in w]
         self.assertEqual(len(fsi), 1, result.warnings)
         self.assertIn("The cavitation floor is NOT written: "
                       "--no-initial-void-floor.", fsi[0])
@@ -494,8 +506,13 @@ class InitialVoidFloorTests(unittest.TestCase):
         self.assertIn(_FLOOR_ROW, lines)
         state.options.initial_void_floor = False      # after the decision
         blast_ale._make_fsi_coupling(state)
-        fsi = [w for w in state.warnings if "NOT VALID" in w]
+        # R14 round 10 (A10 2b writes the void copy on a CLIS-coupled
+        # *INITIAL_VOID deck): the void sentence is now the copy's; both
+        # forms carry the floor clause, read from the record
+        fsi = [w for w in state.warnings
+               if "is the ALE fluid group of the emitted /INTER/TYPE18" in w]
         self.assertEqual(len(fsi), 1, state.warnings)
+        self.assertIn("LAW6 COPY", fsi[0])
         self.assertIn("k2rad writes the cavitation floor", fsi[0])
         self.assertFalse(any("--no-initial-void-floor:" in w
                              for w in state.warnings))

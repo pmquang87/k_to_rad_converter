@@ -132,12 +132,17 @@ class MassScalingPathUnchangedTests(_EngineDeckMixin, unittest.TestCase):
         return TSSFAC_K.replace("       0.0\n*MAT", "-1.1120E-6\n*MAT")
 
     def test_still_emits_noda_cst_with_tssfac_as_tsca(self):
-        _r, engine = self._convert(self._deck())
-        self.assertIn("/DT/NODA/CST/0", engine)
-        row = engine.split("/DT/NODA/CST/0", 1)[1].splitlines()[1]
-        tsca, tmin = row.split()
-        self.assertEqual(float(tsca), 0.8)
-        self.assertAlmostEqual(float(tmin), 1.112e-6, places=12)
+        # R14 round 10, A4: Tmin = TSSFAC x |DT2MS| = 0.8 x 1.112e-6 =
+        # 8.896e-7 by default; --no-dt2ms-tssfac-product keeps |DT2MS|
+        for kw, want in (({}, 8.896e-7),
+                         ({"dt2ms_tssfac_product": False}, 1.112e-6)):
+            with self.subTest(**kw):
+                _r, engine = self._convert(self._deck(), **kw)
+                self.assertIn("/DT/NODA/CST/0", engine)
+                row = engine.split("/DT/NODA/CST/0", 1)[1].splitlines()[1]
+                tsca, tmin = row.split()
+                self.assertEqual(float(tsca), 0.8)
+                self.assertAlmostEqual(float(tmin), want, places=12)
 
     def test_mass_scaling_deck_gets_no_extra_bare_dt(self):
         # The two paths are exclusive -- /DT/NODA/CST already carries Tsca.
@@ -151,11 +156,12 @@ class MassScalingPathUnchangedTests(_EngineDeckMixin, unittest.TestCase):
 
 
 class Dt2msTssfacProductTests(_EngineDeckMixin, unittest.TestCase):
-    """--dt2ms-tssfac-product (the CardStack batch, K-41). For DT2MS < 0
-    LS-DYNA makes TSSFAC x |DT2MS| the minimum step (Vol I R17 p.12-585),
-    while the default /DT/NODA/CST Tmin above is |DT2MS|, a step 1/TSSFAC
-    larger. The opt-in writes the product as Tmin, on /DT/NODA/CST and on
-    /DT/AMS; the default stays |DT2MS| (pinned above)."""
+    """--dt2ms-tssfac-product (the CardStack batch, K-41; the DEFAULT since
+    R14 round 10, A4). For DT2MS < 0 LS-DYNA makes TSSFAC x |DT2MS| the
+    minimum step (Vol I R17 p.12-585); /DT/NODA/CST writes that product as
+    Tmin, --no-dt2ms-tssfac-product writes |DT2MS| (a step 1/TSSFAC
+    larger). /DT/AMS keeps |DT2MS| on both arms, as dyna2rad writes it
+    (convertcards.cxx:233-234; D12)."""
 
     def _deck(self, tssfac="       0.9"):
         return (TSSFAC_K.replace("       0.8", tssfac)
@@ -171,19 +177,27 @@ class Dt2msTssfacProductTests(_EngineDeckMixin, unittest.TestCase):
         self.assertEqual(tsca, 0.9)
         self.assertAlmostEqual(tmin, 9.0e-7, places=15)
 
-    def test_default_keeps_tmin_at_dt2ms(self):
+    def test_default_holds_tmin_at_the_product(self):
         _r, engine = self._convert(self._deck())
+        tsca, tmin = self._cells(engine, "/DT/NODA/CST/0")
+        self.assertEqual(tsca, 0.9)
+        self.assertAlmostEqual(tmin, 9.0e-7, places=15)
+
+    def test_the_opt_out_keeps_tmin_at_dt2ms(self):
+        _r, engine = self._convert(self._deck(), dt2ms_tssfac_product=False)
         tsca, tmin = self._cells(engine, "/DT/NODA/CST/0")
         self.assertEqual(tsca, 0.9)
         self.assertAlmostEqual(tmin, 1.0e-6, places=15)
 
-    def test_flag_on_the_ams_branch(self):
-        # Tsca stays AMS's 0.67; Tmin is TSSFAC x |DT2MS|, not 0.67 x |DT2MS|
-        _r, engine = self._convert(self._deck(), ams=True,
-                                   dt2ms_tssfac_product=True)
-        tsca, tmin = self._cells(engine, "/DT/AMS")
-        self.assertEqual(tsca, 0.67)
-        self.assertAlmostEqual(tmin, 9.0e-7, places=15)
+    def test_ams_keeps_tmin_at_dt2ms_on_both_arms(self):
+        # Tsca stays AMS's 0.67; Tmin is |DT2MS| whatever the lever (D12)
+        for flag in (True, False):
+            with self.subTest(flag=flag):
+                _r, engine = self._convert(self._deck(), ams=True,
+                                           dt2ms_tssfac_product=flag)
+                tsca, tmin = self._cells(engine, "/DT/AMS")
+                self.assertEqual(tsca, 0.67)
+                self.assertAlmostEqual(tmin, 1.0e-6, places=15)
 
     def test_blank_tssfac_takes_0_9(self):
         _r, engine = self._convert(self._deck(tssfac="       0.0"),
@@ -194,15 +208,16 @@ class Dt2msTssfacProductTests(_EngineDeckMixin, unittest.TestCase):
 
     def test_negative_tssfac_curve_takes_0_9(self):
         # TSSFAC < 0 names a load curve of the scale factor, which is not
-        # converted: Tsca 0.9 and Tmin |DT2MS| by default, 0.9 x |DT2MS|
-        # under the flag (on /DT/AMS too, Tsca 0.67 there) - never the
-        # negative curve id as a factor. Fix round: no test had a TSSFAC < 0,
-        # so the branch could change the DEFAULT Tsca unseen.
+        # converted: Tsca 0.9 and Tmin 0.9 x |DT2MS| by default (round 10,
+        # A4), |DT2MS| under --no-dt2ms-tssfac-product; /DT/AMS: Tsca 0.67
+        # and |DT2MS| on both arms (D12) - never the negative curve id as a
+        # factor. Fix round: no test had a TSSFAC < 0, so the branch could
+        # change the DEFAULT Tsca unseen.
         for flag, ams, card, want_tsca, want_tmin in (
                 (False, False, "/DT/NODA/CST/0", 0.9, 1.0e-6),
                 (True, False, "/DT/NODA/CST/0", 0.9, 9.0e-7),
                 (False, True, "/DT/AMS", 0.67, 1.0e-6),
-                (True, True, "/DT/AMS", 0.67, 9.0e-7)):
+                (True, True, "/DT/AMS", 0.67, 1.0e-6)):
             with self.subTest(flag=flag, ams=ams):
                 _r, engine = self._convert(self._deck(tssfac="      -3.0"),
                                            dt2ms_tssfac_product=flag,

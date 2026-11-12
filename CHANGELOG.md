@@ -53,6 +53,1139 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN PARITY batch, round 10 - the verification round (the four
+  post-PR verifiers of PR #148; findings 6.29 - 6.35; no default changes, no
+  emitted byte moves).** Started on the then PR head `bc2910c`; the code commit is
+  `218b06a`. Every figure below was re-measured by this round (its own runs,
+  scorers and scans; the verifiers' run directories only where their decks
+  were SHA-checked against this round's own conversions).
+  - **Seventeen boundary pins** (the code verifier's 17 non-equivalent
+    surviving mutations; the code was right at the head, the tests were
+    missing): A8 the MEDIAN segment penalty (a blank with one stretched quad,
+    median != mean - on pan.drawbead.31 the mean would have moved Stmax
+    7882.99 -> 10429.5); B2 the `/TH/INTER` representative, the implicit
+    np = 1 solid-surface warning and the `--auto-gapmin` sentence of a
+    SURFATYP-5 card over a stated SSID; A5 a negative `--fixpoint-count`
+    (clamped to 0) keeps the end fix point; A6's part-scoped and VALDMP < 0
+    refusals; A7's light-fluid Pmin fallback -1e-20 under
+    `--no-mat-null-pc-mu` (Pmin 0 is -INFINITY on LAW6,
+    `hm_read_mat06.F:154`); A9 a near-default SLSFAC 0.10005 is named; B1 a
+    SOFT -11 card carries no Igap-2 clause; B9 Isolid 17 (the default
+    `/PRELOAD` bar) and Isolid 14 (ELFORM 10 hexes) print no formulation
+    warning; the fix round's five conditional-TSSFAC boundaries (a blank
+    TSSFAC under DT2MS < 0 is dyna2rad's product; a TSSFAC < 0 curve prints
+    no default sentence and no SLSFAC pointer; the pointer only on class a;
+    a skipped `*CONTACT_` keyword counts as a contact; the routed 2-D deck).
+    Mutation proof on throwaway worktrees at `218b06a`, the whole suite per
+    mutant: 27 mutants (the 17 survivors + 10 of this round's own: the eroding scope x2, the SURFATYP 6 / 7
+    drop, the 1.00x silence, the `--dt-del` words, the SHRF recorders x3 and their registry step, a
+    README cycle-0 needle), 27 CAUGHT, each by its own new test in the focus module AND in the whole
+    suite (`-x`, SUBFAILED counted), the file restored and `git status --porcelain --ignored` empty
+    after each. The coordinator's follow-up (findings 6.34 (4); tests only) adds eight more pins,
+    one per mutant of the coordinator's that survived the whole suite at `5108531`: the SHRF route
+    recorder at `/PROP/TYPE11` and at the `/PROP/TYPE51` of an `*INTEGRATION_SHELL` layup, the
+    membrane exclusion (ELFORM 5 / 9) of the `*PART_COMPOSITE` recorder, the sentence's cap of ten
+    (11 routes print ten and '... (11 in all)'), the eroding route's MAIN-side SURFATYP 6 / 7 drop,
+    the main side's written parts (MSID 0 / SURFBTYP 5) and a `*SET_SEGMENT` side's part in the B6
+    scope, and the `--no-erode-tsmin-rule` twins of the three deletion-floor half-request tests, each
+    mutant KILLED by its own new test in the two changed modules and in the whole suite. The closing
+    round (findings 6.35 (2), the final check's tests reviewer; tests only, `e1e007b`) adds four more:
+    ERODE 2 / 10 / 111 with TSLIMT > 0 on the `--no-erode-tsmin-rule` arm write no `/DT/<elem>/DEL`
+    card (the trigger is ERODE equal to 1), the set id inside the SURFATYP 6 / 7 drop on the main side
+    and on the secondary side (there with its remedy), a section recorded twice is named once, and
+    every member of `_SHRF_NO_SHEAR_ELFORMS` on the `*PART_COMPOSITE` recorder: 8 mutants (the
+    reviewer's four whole-suite survivors and four of the round's own), each surviving the whole suite
+    at `b6862a5` (7087 passed) and KILLED at `e1e007b` by its own new test and by no other test of the
+    two modules (a run without `-x`).
+  - **The eroding `/INTER/TYPE25` route** (findings 6.31 (2)(b), 6.33 (4)):
+    its B6 sentence named a no-contact-stiffness law (LAW169) only on the
+    parts `ish_pids` reads, so an `*CONTACT_ERODING_SINGLE_SURFACE` with
+    SURFATYP 5 over a stated SSID wrote `/SURF/PART/ALL` over the LAW169 part
+    and said nothing. It now names the parts of the surface it WRITES
+    (`_type25_surface(written_pids=...)`), and a SURFATYP 6 / 7 side of an
+    eroding single-surface or surface-to-surface card is dropped by the type's
+    meaning (`_styp567_clause`), not 'names no part or part set' (the MAIN
+    side of an `*CONTACT_ERODING_NODES_TO_SURFACE` card keeps the old text: a
+    ROADMAP round-11 text item). Six sites share the one predicate `single_surface_scope`; the
+    eroding family keeps its own rule, and its sentence follows the surface
+    it writes. `ish_pids` (the Ishape cell's scope, an emitted byte) is not
+    changed: a ROADMAP round-11 question.
+  - **The shells the SHRF rule does not reach are named** (findings 6.32
+    (2)(f)): `/PROP/TYPE9` writes Ashear 0, `/PROP/TYPE11` and the
+    `/PROP/TYPE51` of an `*INTEGRATION_SHELL` layup 0.833333, a
+    `*PART_COMPOSITE` without a stated 0 < SHRF <= 1 0.833333 - the starter's
+    5/6 every time (`hm_read_prop09.F:266`, `hm_read_prop11.F:280`,
+    `hm_read_prop51.F:255`) - where LS-DYNA runs the stated SHRF or its
+    default 1.0 (Vol I R17 p.41-63; `*PART_COMPOSITE` Card 3a). One sentence
+    per deck (`writer/mesh._warn_shrf_other_routes`, recorded by the
+    emitters, a starter-registry step that writes no line). The cells are
+    unchanged. R14: 5 keys / 5 models - tensile2 and the anisotropic
+    cup-draw on TYPE9, integration_shell.lobotto.beam, 275key2 and 3.3_Composite_Analysis's
+    `*PART_COMPOSITE` on TYPE51; LS-DYNA's d3hsp echoes `shear area factor = 1.0` on all five.
+  - **The conditional-TSSFAC sentence** (6.33 (3)(b) / (c)): silent where
+    OpenRadioss's own default equals LS-DYNA's to the printed digit (a routed
+    2-D deck's 0.67 against a 0.667 class: 1.00x); under `--dt-del` it names
+    the `/DT .../DEL` card (Tsca 0.9, 0.67 on `/DT/QUAD/DEL`) instead of
+    'writes no /DT scale factor' (`_dt_deletion_floor`, the one decision the
+    deletion card and the sentence read); its docstring says 2.70x. The
+    default sentence is byte-identical on the 9 carriers.
+  - **Texts that were false or unscoped, corrected** (code strings, help, GUI
+    label, README, CHANGELOG, ROADMAP): A7 1b carries its MASS BALANCE
+    (findings 6.31 (1); the verifier's 'LS-DYNA admits no material' was
+    refuted by the reference's own matsum, so the inlet stays a default):
+    LS-DYNA's water group (matsum `ALE MMG # 1`, |mom| / |rbv|, its KE =
+    glstat's to 4-5 digits) gains 1.990e-2 t/s = 0.995 x rho v A early, the
+    inlet's fluid mass equals it to +0.11 / +0.43 / +1.41 % at t 1e-3 / 2e-3
+    / 3e-3, LS-DYNA lets the fluid out at the open faces of its Eulerian mesh
+    (EBC 0) and OpenRadioss closes them: +71.65 % at the end (stagnation_B
+    +63.60 %), mass RMS 35.53 % against 26.05 % with the `/IMPVEL`;
+    stagnation_B's IE END +2110498.93 % / RMS 42547.07 % is named with its
+    cause (PFAC -2 and DAMP 1.0 unconverted, B runs A's physics). A8's force
+    figures name their definition: |FN + FT| against the rcforc resultant,
+    the punch 474.43 -> 46.72 % on the part-A-i base and 473.84 -> 46.72 %
+    on `ed52c93`, control_adaptive's three forces 13.49 / 15.40 / 20.79 ->
+    14.34 / 15.62 / 22.16 % (all worse); 'contact-1 448.66 -> 41.68 %' was
+    the normal force alone and the binder's '108.23 -> 93.23 %' does not
+    reproduce (FN 91.24 -> 91.41 %). The routed implicit N2S caution names
+    the bytes of its 125-run spread (pre-round-10) and the round-10 bytes' 12
+    runs (-21.37 .. -21.41 %, no second branch seen). doorbeam's base is a
+    -28 / -16 lottery (6 runs of the `ed52c93` bytes: -27.99 / -28.03 /
+    -15.85 at nt 4, -15.85 / -16.13 / -28.08 at nt 2), so its BETTER entry
+    attributes no gain: BETTER 23 by the regress rule, 22 attributable. The
+    A5 sliver is a range of four runs (KE 52.3 .. 111.0 -> 3.57e8 .. 6.06e8
+    at ratio 0.05; a hex probe at ratio 0.115: 0.160 -> 37.16); a read-only
+    scan of the 14 implicit rows with a scored verdict finds none below a
+    ratio of 0.5 (lowest 0.622, 4.3; report section 0.36.2), and the scorer
+    guard is a campaign candidate. The transducer is MIXED (KE RMS 15.19 ->
+    17.28 %, n 947 / 948, IE RMS 18.66 -> 17.32 %, IE END +39.12 -> +42.52
+    %). The `--implicit-rayleigh-damping` help says no measured case favours
+    it. The A2 sentence's figure is the coupon's; the S-excl parenthetical
+    covers the N-1 property's 0; the initial-state keep says that an NTHICK
+    1 record is skipped. The billet's verdict flip is a match of two
+    mass-scaled runs (LS-DYNA adds 199.18 %, OpenRadioss 248.2 % on
+    `ed52c93` and 182.7 % here; the strict launcher refuses both). The
+    `results_check.py` citation is `:193` / `:246`. The K-04 cap is
+    RE-OPENED for round 11 (on the round-10 bytes lifting it improves every
+    bend.k channel: IE RMS 1.30 -> 0.79 %, KE RMS 9.40 -> 7.89 %, IE END
+    -1.70 -> -0.52 %, KE END -30.36 -> -6.83 %, nt 4, n 500). Outside the
+    roster: Ryan_Lee `W12_SETUP_Water_ALE_Elastic` (4 files, 1 model) moves
+    by bytes under A10 2b, unmeasured; the getriebekette backups' later ids
+    move as /SURF/PART/EXT/90012 + /INTER/TYPE25/90001 enter (/BCS and
+    /GRNOD/NODE 90012 - 90015 -> 90013 - 90016, a new /TH/INTER/90017) -
+    there is no later /INTER.
+  - **Retracted spellings** (guarded over case-folded, hyphen- and
+    whitespace-collapsed text in every shipped file; CHANGELOG may quote
+    them): 'negative volume at cycle 0' (README, the
+    `--default-hourglass` help, a `state.py` comment), 'LS-DYNA's default 0.9
+    is also the `/DT` default', 'TSSFAC = 0 is LS-DYNA's "use my default"
+    (0.9)', '(these default bytes, nt 4)', '(it stays 0, the starter's 5/6)',
+    'KE 91.3 -> 6.06e8', 'the shipped default with --implicit-n2s-type7',
+    'contact-1 force RMS 448.66'.
+  - **Movers** (two scanners over the 356 roster keys converted from `F:`,
+    `218b06a` against `bc2910c`): 0 byte movers; 37 keys / 32 models by warning text
+    (the A5 sliver 21 / 16, S-excl 7 / 7, the SHRF routes 5 / 5, A8 4 / 4, A7 2 / 2, A2 1 / 1, N2S
+    1 / 1; 0 unlabelled), re-converted through `convert_all.py --tree` at `0d3a4e1` (37
+    RECONVERTED, not re-run; a first batch, run while a docs edit sat in the worktree, was
+    discarded); the ledger and WORSE 20 / BETTER 23 unchanged; the rows naming the branch 243 -
+    report section 0.36.2. Tests:
+    `tests/test_r14_round10_verify.py` (new, 51 tests: 39 of this round, 10
+    of the follow-up, 2 of the closing round); re-derived
+    pins in `tests/test_r14_round10.py` (the S-excl prefix, the A replacement
+    needle, the K-04 bullet record), `tests/test_cardstack_pipeline_props.py`
+    (the S-excl prefix) - each of these four fails on `bc2910c`. Each class of
+    this round's 39 tests fails on `bc2910c` or, for the boundary pins, on its
+    named mutant of it (24 of the module's 51 tests pass on `bc2910c` by
+    design: pins of code that was right there, controls and the two guard
+    self-tests); the follow-up's 13 tests
+    (10 in the new module, 3 in `tests/test_dt_deletion_floor.py`) form 8
+    classes, each failing on its own mutant of `5108531`, and the closing
+    round's pins each fail on their own mutants (above).
+- **R14 CAMPAIGN PARITY batch, round 10 - the fix round (the four
+  validators' findings; text only, no emitted byte moves).** On the part-B
+  head `ab53752`; the review diff of the round stays `git diff
+  b17c298...HEAD`. Every item measured; the roster slice re-converted both
+  sides (report section 0.36.1).
+  - **LS-DYNA's conditional default TSSFAC is named where k2rad writes no
+    scale factor** (the fidelity validator's F1, MAJOR). LS-DYNA's blank
+    TSSFAC depends on the deck (Vol I R17 p.12-588 / 12-589 Remark 1: a
+    contact with `*CONTROL_CONTACT` SLSFAC >= 9 -> 0.333, >= 1 -> 0.667;
+    `*INITIAL_DETONATION` or `*BOUNDARY_NON_REFLECTING` -> 0.667; else 0.90),
+    while OpenRadioss without a `/DT` card steps at its own 0.9
+    (`contrl.F:1148-1149`). One sentence per deck, owned by the keyword of
+    the class (`writer/assembly._warn_ls_default_tssfac`; one rule,
+    `_ls_default_tssfac`), where TSSFAC is blank, DT2MS >= 0 and the run is
+    explicit; the A9 SLSFAC sentence points at it. MEASURED (the fix round's
+    scanner: raw keyword text with `*INCLUDE` against each deck's d3hsp `time
+    step scale factor`; the echo equals the rule on all 353 R14 decks that
+    print one): 10 keys / 8 models carry the class - underwater_A .. _F
+    (0.6670), contact.projectile and projectile (SLSFAC 1, 0.6670),
+    proj-errod (SLSFAC 10, 0.3330: OpenRadioss steps at 2.70x LS-DYNA's
+    factor) and efg/metal-cutting (SLSFAC 2.5; implicit, so nothing is
+    printed there) - 9 explicit keys / 7 models get the sentence. Writing
+    the factor is NOT in this round: it would move those 9 / 7 by bytes and
+    their cycle counts by 1.35x - 2.70x, and no run measures it (ROADMAP,
+    round 10's NOT list, entry 6, corrected: its first record said 0
+    carriers, which holds for the DT2MS < 0 class only). F5: the DT2MS < 0
+    blank-TSSFAC words now say 0.9 is k2rad's and dyna2rad's choice
+    (`convertcards.cxx:166`) and name the deck's own LS-DYNA default; the
+    'dyna2rad writes the same product' clause holds for TSSFAC >= 0 only.
+    Tests: `tests/test_r14_round10.py` `LsDefaultTssfacNamed` (each class, the
+    precedence, the controls: a stated TSSFAC, SLSFAC 0.1 / blank, no
+    contact, an implicit deck, DT2MS < 0).
+  - **Text fixes of the fidelity validator (F2 - F6).** The NIP-1 clause of
+    A1's exclusion sentence, help, README, K_ROUTE and the A1 entry below
+    states its sources - on the N-1 property the starter zeroes Ashear
+    (`hm_read_prop01.F:246-259`) and the engine integrates no transverse
+    shear (`c3coef3.F:134-137`); a NIP-1 section kept at N 2 runs at 5/6 -
+    instead of "LS-DYNA does not shear these sections transversely", which
+    no manual page states for NIP 1. A1's named losses stand in the help and
+    README beside the gains (F3). A2's cantilever figure is the shipped
+    default bytes' (the NIP-1 strips -81.9 .. -82.7 mm, nt 4), not the
+    hand-edited census arm's -81.76 mm (F4). A8's cell sentence says 'where
+    Stmax binds'; the S-kirch sentence names Ish3n 0 on the triangles
+    (`hm_read_prop01.F:193`); B2's sentence says a solid spot-weld part is
+    included (F6).
+  - **The campaign validator's A1 rows.** constrained.spotweld.plates moves
+    AWAY at its END only (named in the A1 entry below with its measured
+    cause: the welds release 21 us earlier; both RMS improve); contact.edge's
+    KE END move is named beside its IE END; airbag-ii's KE END +7.38 ->
+    +8.41 % is named with the rows that move away, its band beside it; the
+    band sentence says what one twin covers and what it does not (a one-twin
+    band is a lower bound of the scatter).
+  - **The physics validator's minors.** The 2a sentence of a CLIS set with an
+    A7 light fluid names the nodal first step the element-based estimate does
+    not model (stagnation_A +22.6 %: the written Stfval is 0.665 x the
+    rule's; a sentence, not a refusal - the shipped opt-in arm ran with it;
+    opt-in path only, 0 default movers). The package sentence names the
+    bird_B plate's energy split against LS-DYNA's matsum (IE 0.809 against
+    0.4637, +74.5 %; KE 2.629 against 4.6433, -43.4 %; 0 / 0 without the
+    package). The A8 record states pan.drawbead's strict-audit FLAG and its
+    contact-energy balance (the A-ii entry below). Tests:
+    `ClisPfacNodalFirstStep`, `A10PackagePlateResidual`.
+  - **Six surviving mutations killed** (the code validator: 48 whole-suite
+    mutations at `ab53752`, 6 survived, each a test gap): one subTest per
+    member of `_SHRF_NO_SHEAR_ELFORMS` (`A1ExclusionEveryMember`, with the
+    placeholder section's direct pin) and of `_TWO_D_SHELL_ELFORMS_A2`
+    (`A2TwoDElformsEveryMember`); A13's variance sentence pinned in code,
+    help and README; B3's SFM < SFS case
+    (`TiebreakCompanionStfac.test_the_smaller_sfm_wins_too`); B7's SOFT 1
+    case (`SrndeControlContactShledg.test_soft_1_ignores_the_control_shledg`);
+    an IMFLAG segment chain's end points (`A5EndFixpointOnASegmentChain`);
+    the opt-in's own defaults (`A6OptInDefaults`).
+  - **Docs.** Every campaign figure the round's docs stated before the
+    campaign pass is replaced by the one report section 0.36 MEASURED (the
+    ledger, the
+    implicit residue 24 / 24, the billet's flip, the two status movers); the
+    half-A reach is the measured 238 keys / 205 models by bytes or warning
+    record (169 / 147 by bytes; the synthesis expected 234 / 203 - the 4 more
+    are underwater_C .. _F, whose AMMG sentence A7 changed). ROADMAP: round
+    10's NOT entries 2 (the plate residual, the nodal first step), 6 (the
+    conditional TSSFAC record, corrected) and 7 (the TSLIMT shell-modulus
+    floor, 0 roster carriers by the fix round's scanner), and two round-11
+    candidates the validators found on the way (an explicit QEPH strip 0.6 %
+    stiffer than its closed form; NSOLVR 1 written as `/IMPL/NONLIN/1`).
+    `docs/R14_ROUND10_MERGE_DUTIES.md`: the merge duties of section 0.37.
+- **R14 CAMPAIGN PARITY batch, round 10 - part B (the CardStack batch's
+  contact and damping leftovers with 0 roster movers, and the docs of the
+  round).** One commit per item in the order B1, B2, B3, B6, B7, B4, B8, B9,
+  then B10 and the docs, on the part-A-ii head `1205c13` (part A-i + master
+  `b17c298` + part A-ii). Part B's default bytes move 0 deck keys / 0 emitted
+  models (B1 0 / 0, B2 0 / 0, B3 0 / 0, B7 0 / 0, B8 0 / 0; no key is
+  shared) and 0 warning records on the 356 roster keys: the sweep of all 356
+  R14 keys (units Mg mm s) through the last part-B code commit `140250d`
+  against the part-A-ii head's own sweep (`6f1a0c4` = the bytes of `1205c13`)
+  reads 0 byte movers, 0 warning-record movers, 0 recognized-not-emitted
+  movers and 0 conversion errors, the 34 match rows unmoved. B4, B6 and B9 are
+  text only, B10 is docs, and B5 was closed on master by PR #147 before this
+  part began. Outside the roster B2 gives the two getriebekette
+  `..._exclude_actor0` / `_exclude_actor1` backups the contact they lacked (no
+  `/INTER` before; one `/INTER/TYPE25` over every part but 10000000) and B4
+  moves the numbers of one Model-318 line (152.6 -> 101.7, still below its
+  floor). Two new default-ON levers with their opt-outs (decision 8 of
+  2026-11-01): `--no-surfatyp-all-parts` (B2) and
+  `--no-tiebreak-companion-stfac` (B3). Every byte-moving rule's coupon bytes
+  equal a census arm whose engine run measured it (B1 p1gap05, B2 p2ssid0 /
+  p2b6h, B3 p3bhand, B7 P2S, B8 st10fix; only a deck or card title line
+  differs on B2 / B7 / B8), and part B's own runs of them on its bytes (nt 4)
+  reproduce the census runs' last cycle rows (508 / 510 / 508 / 514 printed
+  cycles; B8's T01 GLOBAL channels byte for byte).
+  - **A self-mirrored SOFT -7 `*CONTACT_AUTOMATIC_GENERAL` over shells takes
+    Gapmin = |SST|** (B1; CardStack K-12, inside
+    `--no-single-surface-sst-gap`). Its `/INTER/TYPE7` is Igap 2, a gap of
+    max(Gapmin, t_s/2 + t_m/2) (`i7cor3.F:98-121`), so the old (|SST| +
+    |MST|)/2 lost the part of |SST| above t: MEASURED on two t 0.35 cards
+    with SST 0.5 (nt 4) the card engaged at 0.3501 mm with Gapmin 0.25 and
+    engages at 0.5005 mm with Gapmin 0.5 (LS-DYNA's |SST| = 0.5; the B1 bytes
+    equal the measured one-cell arm, starter MINIMUM GAP 0.5). A mixed shell
+    / solid set keeps the old value by name, a two-surface SOFT -7 card is
+    unchanged, an SST below t keeps the OPTT sentence; an MST beside SST no
+    longer lifts the Gapmin (a single-surface card has no SURFB, Vol I R17
+    p.11-33: SST 0.1 with MST 1.0 writes 0.1, was 0.55, and the OPTT lever is
+    named); on this route no sentence offers `--inter-gapmin` (it does not
+    reach the sentinel routes). Tests: `tests/test_cardstack_pipeline.py`
+    `SingleSurfaceSstGap` (two re-pinned, four new),
+    `SingleSurfaceSstGapReviewPins::test_soft_7_names_the_unused_mst_and_the_optt_lever`,
+    `HandOverHelpTexts::test_the_k1b_flags_say_what_they_reach`. R14: 0
+    movers (0 carriers on six rosters).
+  - **A single-surface `*CONTACT` with a stated SSID and SURFATYP 5 / 6 is
+    converted** (B2; default ON, `--no-surfatyp-all-parts`). SURFATYP 5
+    ('include all non-spot-weld parts (the SURFA field is ignored)', Vol I
+    R17 p.11-25) takes the SSID = 0 all-parts route on both routes (its
+    bytes equal the SSID = 0 card's); SURFATYP 6 takes, on an explicit deck,
+    the all-parts `/INTER/TYPE25` over every part except the exempted
+    `*SET_PART` (an implicit 6, a missing set, a set exempting every part and
+    SURFATYP 7 - a `*SET_PART_TREE` branch, no reader - are dropped by
+    name). Six sites share the one predicate,
+    `writer/common.single_surface_scope` (the writer, the solid-main
+    registry, the `/TH/INTER` pick, the lever report, the joint-screw split,
+    the K-04 skip text); the eroding family (`*CONTACT_ERODING_SINGLE_SURFACE`,
+    another record type) keeps its own rule, and since the verification round
+    its B6 sentence follows the surface it writes. MEASURED (shell cards thrown at 1000 mm/s, nt 4): dropped as
+    before the cards passed through each other; routed they engage at
+    0.3489 mm (t_s/2 + t_m/2 = 0.35), and the exempted card passes through.
+    The drop text no longer says the set 'names no part, part set or node
+    set' on every route that meets a SURFATYP 5 / 6 / 7 side
+    (`_styp567_clause`, convertcontacts.cxx:268-291). Tests:
+    `AssRouteIsNamed` (two re-derived), `SurfatypAllParts` (10 new),
+    `Round10FlagWiringB`. R14: 0 movers; non-roster: the two getriebekette
+    `..._exclude_actor` backups get their contact (no `/INTER` before).
+  - **The `*CONTACT_..._TIEBREAK` post-rupture companion `/INTER/TYPE25`
+    takes `--soften-stfac`, else the card's Card-3 min(SFS, SFM)** (B3;
+    default ON, `--no-tiebreak-companion-stfac`: the opt-out of decision 8).
+    LS-DYNA's tiebreak behaves as a surface-to-surface contact after failure
+    (Vol I R17 p.11-39 Remark 1) whose penalty Card 3 SFSA / SFSB scale; the
+    companion was always written Stfac 0 = the starter's 1.0
+    (`hm_read_inter_type25.F:620-622`). A value of exactly 1.0 is still
+    written 0 (a default card keeps its bytes); `--soften-stfac` wins over the
+    card. MEASURED on a two-block tiebreak coupon under `--soften-stfac 0.3`
+    (nt 4; the B3 bytes equal the measured one-cell arm): STIFFNESS FACTOR
+    1.000 -> 0.300, the re-contact penetration 0.000914 -> 0.002344 mm, 685
+    -> 515 cycles. A TYPE25 Stfac scales its segments (`i25sti3.F:140`) and,
+    with Istf 4, its secondary nodes (`inintr1.F:94-99`, `i25stslav.F:56-64`).
+    `ContactTiebreak` now keeps SFS / SFM. The `--soften-stfac` help, the GUI
+    label and the summary line say the companion is reached. Tests:
+    `SoftenStfacReach` (two re-derived),
+    `SoftenStfacWarningFollowsTheRoutes::test_the_tiebreak_companion_is_reached_and_the_opt_out_named`,
+    `TiebreakCompanionStfac` (8 new), `Round10FlagWiringB`. R14: 0 movers
+    (the one roster tiebreak is `_NODES_ONLY`).
+  - **The K-02 stiffness estimate reads the starter's own B, tet volume and
+    TET10 node volume** (B4; warning text only, no byte). B = the emitted
+    law's PM(32): E for `/MAT/LAW38`, the largest written modulus for
+    `/MAT/LAW50`, the largest written uncompressed modulus for `/MAT/LAW28`
+    (LAW90 and every isotropic law unchanged); a tet main face is over the
+    starter's 1.5 V (it stores a tet as a degenerate brick,
+    `hm_read_solid.F:278-284` / `:386-392`, whose one-point volume is 1.5 V,
+    `i7sti3.F:426-444`); a `/TETRA10` secondary node takes VOLU/32 (corner)
+    or 7 VOLU/48 (midside) of VOLU = V/4 (`s10init3.F:233` / `:347`,
+    `sbulk3.F:152-181`). MEASURED by one-cell Stmin brackets (nt 4): the
+    engine's K lies in [180, 220) on a LAW38 foam (the estimate said 66.67,
+    now 200), [10.3, 10.5) on a TET10 main (15.62 -> 10.42), [160, 173) on a
+    TET4 main (250 -> 166.7), [28.5, 29.5) at the softest TET10 secondary
+    node (28.89; the median 85.15 -> 48.28). Tests:
+    `StminEstimateLawsAndTets` (9 new; one pins the softest TET10 node,
+    28.89, through the per-node list - the median 48.28 is a midside
+    node's and does not see the corner share). R14: 0 movers; 1
+    openradioss_run line's numbers move (Model-318: 152.6 -> 101.7, still
+    below its floor).
+  - **B5, the K-08 one-way note after `--s2s-type25`, was closed on master
+    by PR #147** (`ac190c9` / `63ab3c9`, merged into this branch as
+    `e512676` before part A-ii): the note prints only where the
+    `/INTER/TYPE7` is written. Verified on the merged tree: P1E7 with
+    `--s2s-type25` carries no note on both part-A-ii and part-B heads, and
+    without the flag the TYPE7 keeps it; master's
+    `OneWayNoteOnlyOnTheType7` pins both routes (the TYPE25 route and every
+    drop), so part B adds no test and no code.
+  - **A no-contact-stiffness law (LAW169) on an `/INTER/TYPE25` is named**
+    (B6; text). The K-02 naming covered the TYPE7 routes only; the three
+    TYPE25 emitters (the SSID = 0 / SURFATYP self-contact, the eroding /
+    node-to-surface family, `--s2s-type25`) now say that a
+    `*MAT_ARUP_ADHESIVE` part's segments and nodes get no stiffness
+    (`i25sti3.F:884-889`, `i25stslav.F:63-64`) and that the engine search
+    skips them. MEASURED (nt 4): two cards thrown onto a LAW169 block in an
+    SSID = 0 TYPE25 keep 0.04725 of kinetic energy at every 0.2 ms (0.00 %
+    drop) against 50.33 % with `*MAT_ELASTIC` E 10. Tests:
+    `Type25NoContactStiffnessLaw` (6 new, one proving the bytes of all three
+    routes unchanged). 0 corpus carriers.
+  - **A `*CONTROL_CONTACT` SHLEDG turns SRNDE off on a SOFT 2 card** (B7;
+    inside `--no-srnde-ishape`). Card 6 field 1 is read; a SOFT 2 card with
+    Card D SHLEDG 0 and the control SHLEDG != 0 writes Ishape 0 and says
+    SRNDE is not used - 'SRNDE is ignored unless SHLEDG is 0 on both
+    *CONTACT and *CONTROL_CONTACT' (Vol I R17 p.11-117; Card D 'EQ.0: Default
+    to SHLEDG on *CONTROL_CONTACT', p.11-111; Card 6, p.12-79). It wrote
+    Ishape 2 (round) there; the B7 bytes equal the measured square-gap arm
+    (starter GAP SHAPE ALONG MAIN FREE EDGES 1). Tests:
+    `SrndeControlContactShledg` (6 new). R14: 0 movers (0 corpus carriers).
+  - **The K-20 review minors** (B8; inside `--no-damping-curve-window`). (1)
+    The steepness bound judges the direction factors the card writes:
+    alpha_i = SF x curve x ST_i, so a FLAG 1 `*DAMPING_PART_MASS` takes |SF|
+    x max|ST_i| and a `*DAMPING_GLOBAL` with a non-zero ST row max|ST_i| (an
+    all-zero row stays uniform). MEASURED (nt 4 = nt 2): the review's FLAG 1
+    ST 10 probe written as one window kept KE/KE0 0.8201 at 10 ms against
+    the curve's 0.7617 (+7.67 %); the `/DAMP/FUNCT` it now gets (the bytes of
+    the measured st10fix arm) 0.7641 (+0.32 %). The window sentence of a
+    per-direction card prints alpha_i (it printed the uniform alpha: 'alpha=2'
+    on a card whose rows are 1 / 2 / 4). (2) The flat-curve hold at a last
+    abscissa of exactly t 0 is pinned (mutant X09, `pts[-1][0] > 0.0`,
+    survived the 1586 damping tests; on the census probe it decides between
+    13.6 % and 100 % of the KE at 10 ms), and so is the 'stops there'
+    sentence on a deck without ENDTIM (mutant X12). (3) A deck without
+    ENDTIM says 'the end of the run (no ENDTIM > 0 stated)' where five texts
+    said 'ENDTIM=inf'. Tests: `tests/test_cardstack_pipeline_loads.py`
+    `PinFlatCurveEndingAtTimeZero`, `PinStopSentenceWithoutEndtim`,
+    `NoInfInTheWindowText`, `STiInTheEdgeBound`, `AlphaIInTheWindowText`.
+    R14: 0 movers.
+  - **The `/PRELOAD` formulation stable set {5, 14, 17} holds; the probe that
+    'did not reproduce' it was a free bar** (B9; text only). Re-measured (nt
+    4 = nt 2) on a 1 x 1 x 4 hex bar clamped at both end faces, built along
+    z and along (1, 2, 2)/3, `/PRELOAD` Itype 2 at 200 MPa over 2e-4 s:
+    Isolid 5 / 14 / 17 keep the cut brick at 200.0 MPa through the hold and
+    within 196.8 .. 203.2 / 198.6 .. 201.4 / 195.6 .. 204.6 MPa after Tstop;
+    Isolid 1 and 2 lose the cut element right after the hold (ZERO OR
+    NEGATIVE VOLUME and a time-step stop at 2.27e-5 / 2.30e-5 s) or once the
+    stiffness is back (1.43e-4 s, rotated); Isolid 12 carries 0 MPa with only
+    the starter's WARNING 1160 (the 8-point S8FORC3 never calls BOLTST);
+    Isolid 24 diverges once the stiffness is back (1432.1 MPa at 0.8 dT).
+    The tests' `_bar_deck()` is free and collapses at every Isolid (Isolid
+    17: dt < 1e-8 s at 1.483e-5 s). The warning, the comment table, README,
+    the `convert()` docstring, the `deck_enabled` comment, the
+    `_solid_hg_screens` docstring and three test texts now say so (nine
+    sites; the convert() docstring was found by the round's own retraction
+    guard). Tests: `tests/test_preload_inistate.py`
+    `PreloadWarningGateTests::test_the_formulation_warning_states_the_clamped_measurement`.
+    0 movers.
+  - **The K-04 ROADMAP bullet states its measurement** (B10; docs). 'No
+    engine run measures that case' is replaced by the census's three arms:
+    the capped Gapmin 0.1 engages a card 0.075 mm inside LS-DYNA's offset T
+    = 0.175 (0.1009 vs 0.1760 mm with `--inter-gapmin`), and on the two
+    roster carriers the unclamped T is not better (bend.k IE RMS 1.36 ->
+    0.85 %, KE END -45.60 -> -83.08 %; adpips.k IE RMS 2.61 -> 3.37 %, still a
+    match). The cap stays; no byte moves. (The verification round RE-OPENED
+    it for round 11: those bend.k figures are the `ed52c93` bytes'; on the
+    round-10 bytes, which A1 moves, lifting the cap improves every channel -
+    IE RMS 1.30 -> 0.79 %, KE RMS 9.40 -> 7.89 %, IE END -1.70 -> -0.52 %, KE
+    END -30.36 -> -6.83 %, nt 4, n 500; the cap stays for round 10.)
+  - **The round-10 docs** (0 bytes). README: a row for every new flag of the
+    three stages in *R14 parity round 10 options* (the parser-vs-README test
+    holds them), B1 / B3 / B4 / B7 / B8 / B9's sites. ROADMAP: the queue
+    table's round-10 column; "What round 10 closes, and what it does NOT"
+    with the ledger MEASURED in report §0.36 (it equals the synthesis's
+    expectation on every line; the fix round replaced the pre-run wording);
+    "What round 10 deliberately does NOT close" (34 entries: entry 2 written
+    from A10's gate, PASSED; entry 32 without the `--ams` clause A4 took;
+    entry 34 the end fix point's last-row sliver); ONE "**Round 10:**" line
+    on each round-9 NOT entry 1-28 (1 and 19 CLOSED by A1 / A5), on each of
+    the 21 CardStack 'Opened by the batch' bullets and on its 'Owed at the
+    merge' bullet; the implicit residue restated (24 / 24, MEASURED in
+    report §0.36).
+    `docs/IMPLICIT.md`: the `--auto-gapmin` paragraph gives the README's
+    offset-aware rule. `docs/K_ROUTE_FOR_RADIOSS_CARDS.md`: A4's Tmin texts
+    (the measured figures keep their values and name the pre-round-10 Tmin =
+    |DT2MS| they were measured at). Tests: `tests/test_r14_round10.py`
+    `Round10RoadmapRecord`, `Round10ChangelogStages`,
+    `Round10ChangelogReSumsB`, `Round10FlagsInReadme`,
+    `Round10RetractedStatementsB`, `Round10ForbiddenStatements`; the anchors
+    of `Round8RoadmapRecord` / `Round9RoadmapRecordB` follow the new column
+    and sections.
+  - **Retracted spellings** (only CHANGELOG quotes them; guarded by
+    `Round10RetractedStatementsB`): 'the tiebreak companion stays 0', 'not a
+    tiebreak's post-rupture companion', 'keeps Stfac 0 (the engine
+    default)', 'ZERO OR NEGATIVE VOLUME at cycle 0', 'completely SILENT
+    no-op', '1266 -> 1370 MPa', 'was not reproduced on this build', 'were
+    not reproduced in that run', 'No engine run measures that case',
+    'LAW28 / LAW38 / LAW50 / LAW90 is not the starter's', 'the minimum
+    node-to-node distance between its two parts'.
+- **R14 CAMPAIGN PARITY batch, round 10 - part A-ii (ALE and the rigid-tool
+  contacts).** One commit per item in the order A7, A9, A8, A10, each
+  measured on the bytes of part A-i and of the items before it; the base of
+  every byte comparison is the part-A-i head merged with master `b17c298`
+  (`e512676`). The sweep of all 356 R14 roster keys (units Mg mm s; the base
+  `e512676` against the A10 / D-6 head `6f1a0c4`, every key converted on
+  both, 0 errors): part A-ii's default bytes move 9 deck keys / 8 emitted
+  models, every one `_0000.rad` only - A7 2 / 2 (stagnation_A / _B), A8 4 / 4
+  (the 12 Stmax cells), A10 3 / 2 (quadrature_B / _C, one model, and bird_B,
+  the package) - and its sentences 24 keys / 21 models in all: A7 10 / 8
+  (text only on 8 / 6: the refused vacuums of cylinder_impact_A / _B and
+  ale_wavehitcol, and the corrected `*MAT_VACUUM` and AMMG statements on
+  2Dlag and underwater_C / D / E / F), A8 4 / 4, A9 8 / 8, A10 8 / 7 (the
+  CLIS sentence's PFAC clause, the void sentences, the FLOW-TRACKING note);
+  every changed sentence and every byte mover attributed to its item, 0
+  unattributed.
+  - **A7 - `*MAT_VACUUM` in an AMMG deck -> a LAW6 light fluid, and the ALE
+    velocity inlet -> `/EBCS/INLET/VP`, as a pair (both default ON;
+    `--no-vacuum-light-fluid` / `--no-ale-inflow-ebcs`).** A LAW0
+    `/MAT/VOID` cell DELETES the fluid that advects into it (stagnation_A's
+    water loses rho v A = 0.02 t/s) and the water cell beside it goes to a
+    negative density (`srho3.F:199-213`): stagnation_A / _B stopped at cycle
+    832 (NEGATIVE RHO element 260, t 0.00181 of 0.02). An `/IMPVEL` on the
+    boundary nodes of an Eulerian ALE mesh admits no material
+    (`aflux3.F:488-524`: a neighbourless ALE face is a slip wall). 1a writes
+    a vacuum whose `*ALE_MULTI-MATERIAL_GROUP` holds exactly one other
+    material, a `*MAT_NULL` + `*EOS_*` LAW6 carrier, as a LAW6 copy of that
+    fluid under the vacuum's own MID (RHO_I = the vacuum RO, the fluid's
+    `/EOS` with RHO_0 = the fluid RO, Pmin -1e-20; `writer/materials`
+    `_resolve_vacuum_light_fluid`, a decision `mesh._target_mat_law` reads:
+    law 6 there). 1b writes a VAD-0 row on a global X / Y / Z translation
+    whose nodes cover boundary faces of an emitted Iale brick as the
+    `/SURF/SEG` of those faces (outward order) + `/EBCS/INLET/VP` (vel_flag 1,
+    the row's own `/FUNCT` x its Fscale on that component, the other two 0;
+    one material row: alpha 1, the face bricks' density, p 0;
+    `radioss2019/LOADS/inlet.cfg:165-205`, `ebcs8_inlet.F90:693-716`) in
+    place of the covered nodes' `/IMPVEL`; the row is decided before any id
+    is drawn, so a refused row keeps its `/IMP*` card byte for byte. MEASURED
+    (nt 4, README 9.1, 500 LS times in (3.85435e-05, 0.0199996], the A-ii
+    branch bytes): stagnation_A and _B run NORMAL to t 0.02 in 9364 cycles,
+    while their part-A-i bytes, run in the same window, end ERROR TERMINATION
+    at cycle 832 (NEGATIVE RHO element 260) - the two status moves
+    error_engine -> normal are A7's (MEASURED in the campaign pass, report
+    §0.36: the old bytes fail at cycle 832 again in the same window).
+    stagnation_A KE END +25.91 % (fifths +0.62 / +7.33 / +13.31 / +25.90 /
+    +25.91), KE RMS 53.09 % with the light fluid alone -> 14.40 % with the
+    pair; the named COST is the IE: END +839.05 %, IE RMS 172.71 -> 206.79 %
+    (a single-material light fluid smears the water into the light cells;
+    LS-DYNA keeps the vacuum as a phase). stagnation_B KE END +18.60 %, KE RMS
+    60.18 -> 10.03 % (both RMS pairs against the light fluid ALONE, window
+    (3.85435e-05, 0.0199996], n 500; the `ed52c93` bytes die at cycle 832 and
+    have no full-window RMS); its IE END is +2110498.93 % and its IE RMS
+    42547.07 % of LS-DYNA's peak (36.8284; LS-DYNA's IE ends at 1.24088 on B
+    against 2788.98 on A): the converted stagnation_B differs from
+    stagnation_A by one unused `/FUNCT/2` only (six lines; `_0001` identical),
+    because its coupling's PFAC -2 (a penalty curve) and DAMP 1.0 are not
+    converted (the conversion log names PFAC), so OpenRadioss runs A's
+    physics on B. THE MASS BALANCE (the verification round, findings 6.31
+    (1); LS-DYNA's water group = matsum's `ALE MMG # 1` entity, |mom| /
+    |rbv|, whose KE equals glstat's): LS-DYNA's prescribed-velocity face
+    admits the inflow too - the water group gains 1.990e-2 t/s over
+    (3.85e-5, 5.19e-4] = 0.995 x rho v A, and the inlet's fluid mass
+    (OpenRadioss's TOTAL MASS 5.005e-4 -> 9.005e-4, rho v A t exactly)
+    equals it to +0.11 / +0.43 / +1.41 % at t 1e-3 / 2e-3 / 3e-3 - but
+    LS-DYNA lets the fluid OUT at the unconstrained faces of its Eulerian
+    mesh (`*CONTROL_ALE` EBC 0; its net gain falls to 4.3e-4 t/s over
+    (0.0175, 0.02]), while OpenRadioss closes every neighbourless ALE face:
+    the fluid mass ends +71.65 % above LS-DYNA's on stagnation_A (+153.8 %
+    over its start against LS-DYNA's +47.88 %) and +63.60 % on stagnation_B;
+    the mass RMS is 35.53 % of LS-DYNA's peak with the inlet against 26.05 %
+    with the `/IMPVEL` kept (which holds the start mass, -32.37 % at the
+    end). The IE cost above is that filling domain; the outflow is a ROADMAP
+    item. The inflow work is the global EXT-WORK
+    (`ebcs8_inlet.F90:646/656`): stagnation_A 3.42e-5 / 0.122 / 2.467 / 2.519
+    / 22.69 / 818.1 at the LS bndout instants t 1.20165e-4 / 1.60976e-4 /
+    2.01787e-4 / 2.40330e-4 / 1.80021e-3 / 2.00018e-2 against LS-DYNA's
+    0.008369 / 52.86 / 1224 / 1255 / 1255 / 1304 - at the unit coupling
+    stiffness the water hammer that does LS-DYNA's inflow work by t 2.40e-4
+    is not reproduced. Refused by name: a LAW44 partner (cylinder_impact_A /
+    _B), a LAW0 partner (ale_wavehitcol: its `*EOS_MURNAGHAN` is not
+    converted), two partners, RO <= 0, an `/EOS` id clash (1a); a VAD other
+    than 0, a DOF other than 1 / 2 / 3, a BIRTH / DEATH window, a curve that
+    is not a `*DEFINE_CURVE`, a face node that does not hold the two other
+    translations, a face brick not on a LAW6 fluid and a LAW0 part left in
+    the ALE domain (1b: beside a LAW0 vacuum the inlet dies where the
+    `/IMPVEL` deck dies). The `*MAT_VACUUM` sentence's "so nothing flows into
+    it" was measured false and is replaced; the AMMG warning's stagnation_A
+    clause is history now. Movers: 2 keys / 2 models by bytes (stagnation_A
+    d7a41d9fa3d0, stagnation_B 2f774562d950: `_0000.rad`), text on the
+    `*MAT_VACUUM` decks cylinder_impact_A / _B, ale_wavehitcol and 2Dlag;
+    the Lagrangian ELFORM 5 / 6 channels (channel_A / _B / _C, MATCH rows;
+    advection_B / _C) are byte-identical. Tests: `tests/test_r14_round10.py`
+    `VacuumLightFluid`, `AleInflowEbcs`, `A7Texts`,
+    `Round10RetractedStatementsA2`, `Round10FlagWiringA2` (fixture
+    `tests/fixtures/round10/r10_ale_inlet_coupon.k`: starter 0 ERROR(S),
+    `NUMBER OF SEGMENTS FOUND 1`, engine NORMAL in 20 cycles);
+    `test_r14_triage_1.AleSubmaterialTests` re-derived (the route-neutral
+    sentence; the light-fluid drop text with `--no-vacuum-light-fluid` as
+    the `/MAT/VOID` subcase).
+  - **A9 - `*CONTROL_CONTACT` SLSFAC is named (text only, no flag).** Read
+    since round 1 (`handlers.handle_control_contact`) and carried by no
+    `/INTER` cell - the writer reads back only SHLTHK. LS-DYNA scales every
+    sliding-interface penalty by it (Vol I R17 p.12-69, 0 = the default 0.1;
+    Theory R16 eq. 30.7 / 30.8). Now ONE sentence per deck with a contact
+    when it is not 0 / 0.1, from both exits of
+    `writer/contacts._make_interfaces` (`_warn_slsfac_dropped`; five of the
+    eight R14 carriers reach only the early exit, their contacts take the
+    TYPE25 route), once even when a deferred implicit stub calls that
+    section again; a negative value is named as one LS-DYNA does not
+    define. MEASURED on the A-ii branch: the 8 R14 carriers print it once
+    each with their stated value (efg/metal-cutting 2.5, ex_26 1,
+    contact.projectile 1, control_adaptive.cup-draw 0.01, plate-shatter
+    0.01, proj-errod 10, projectile 1, pan.drawbead.31 0.02); the
+    anisotropic cup-draw and hemi.draw (0.1) stay silent. 0 bytes. Tests:
+    `tests/test_r14_round10.py` `SlsfacNamed`.
+  - **A8 - the rigid-tool penalty cap (default ON;
+    `--no-rigid-tool-penalty-cap` writes Stmax 0).** On the `/INTER/TYPE7`
+    of a non-automatic `*CONTACT_ONE_WAY_SURFACE_TO_SURFACE` /
+    `*CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE` (+ `_MPP`) whose emitted
+    main side is all rigid and whose two sides are shells, SOFT 0, PENOPT 0
+    / 1: Stmax = 2 x k_LS, k_LS = SLSFAC x min(SFM x k_tool, SFS x k_blank),
+    k = the median LS-DYNA Theory R16 eq. 30.8 segment stiffness K A / max
+    shell diagonal over the side's shells (`writer/contacts._rigid_tool_cap`,
+    `_ls_shell_penalty`; Card 3 SFM read since this item) - the 2 undoes the
+    1/2 an Istf-4 TYPE7 applies per node (`i7for3.F:976`), so the engine's
+    MAX(Stmin, MIN(Km, Ks, Stmax)) (`i7cor3.F:277-288`) gives each blank node
+    k_LS - and Stmin = min(1000, Stmax); an `--inter-stmin` value wins. The
+    K-02 floor sentence reads the WRITTEN Stmin (`state.type7_written_stmin`).
+    The value is the manual's formula, not what LS-DYNA's runs show (its
+    measured holder penalty on the anisotropic cup-draw is ~100x below it).
+    Refused by name inside the class: a rigid SURFA (the all-rigid-SSID
+    route), SOFT 1 / 2, PENOPT 2-5, a negative SLSFAC / SFS / SFM, a solid
+    side; outside it, unchanged: AUTOMATIC_ONE_WAY, the two-way S2S (20 R14
+    keys with a rigid main), MORTAR and a deformable tool (the ring trio).
+    MEASURED (nt 4, README 9.1, each deck's part-A-i bytes and the capped
+    bytes in one window, run dirs `C:/Users/pmqua/rcv_r10i_implA2_<deck>_
+    {base,new}`): pan.drawbead.31 (t_end 8.5e-3, n 61 LS times (1.36541e-4,
+    8.3864e-3]) 2769 -> 2510 cycles (0.9065), IE END +45.94 -> -15.35 %, IE
+    RMS 10.85 -> 4.01 %, KE RMS 14.24 -> 10.86 %, IE fifths -13.33 / -82.43
+    / +26.00 / -2.40 / +45.90 -> -96.70 / -99.15 / +11.60 / -3.36 / -15.35 %
+    (the first two worse), KE fifths -65.32 / -84.68 / +22.03 / +20.65 /
+    -92.83 -> -98.86 / -99.15 / +17.87 / +5.81 / -91.48 %, contact force RMS
+    of LS's peak (LS rcforc's SURFA resultant against the `/TH/INTER` impulse
+    differenced; re-measured by the verification round with ONE scorer on
+    this run pair, the total force |FN + FT| = the like-for-like of the
+    resultant): the punch (contact 1) 474.43 -> 46.72 %, the binder
+    (contact 2) 92.00 -> 92.21 %, the die (contact 3) 441.24 -> 44.16 % (the
+    normal force FN alone 448.56 -> 41.63 / 91.24 -> 91.41 / 414.12 ->
+    40.19 %; the binder's 108.23 -> 93.23 % shipped before is not
+    reproduced); the capped run's ERROR column hits the -99.9 % print
+    clamp on 569 of 2511 rows from cycle 490 (the base's worst -98.6 %; the
+    column leaves out the contact energy) - the one roster row whose listing
+    newly trips the skill launcher's strict audit (FLAG energy-error-clamped,
+    first at t 0.001637; the launcher ends exit 5 where the `ed52c93` bytes
+    ended 0; `-Advisory` runs it and keeps the gain, the README A8 bullet
+    says so). The balance with the T01 CONTACT_ENERGY added, (IE + KE + CE +
+    HG) / EXTERNAL_WORK at 1/5, 3/5 and END: 0.0406 / 0.9277 / 0.9184 on
+    `ed52c93`, 0.0073 / 0.9166 / 0.7818 on the branch - 21.8 % of the
+    external work unaccounted at END against 8.2 %, while the absolute
+    residual falls 2.546e6 -> 1.720e6 (the external work itself falls 3.120e7
+    -> 7.884e6: `ed52c93` parks 2.468e7 of it in CONTACT_ENERGY); against the
+    `ed52c93` bytes (A1 + A8 on this deck; the physics validator's run, n 61,
+    nt 4) every LS-DYNA channel improves: IE RMS 10.94 -> 4.01 %, KE RMS
+    14.28 -> 10.86 %, the punch / die total force |FN + FT| RMS 473.84 ->
+    46.72 % and 440.84 -> 44.16 % of the LS peaks (the binder 92.01 ->
+    92.21 %). A8 stays the default (findings 6.26 (2)).
+    mat_transversely_anisotropic.cup-
+    draw (t_end 0.015, ALONE, n 150 (9.99569e-05, 0.0149997]) 70728 -> 63169
+    cycles (0.8931), IE END +13.10 -> +8.76 %, IE fifths +93.78 / +121.04 /
+    +60.32 / +18.96 / +13.10 -> +87.60 / +9.58 / +30.66 / +10.96 / +8.76 %,
+    IE RMS 5.57 -> 3.43 %, and the named COST on the KE: END -42.14 ->
+    -49.31 % (fifths -75.33 / +204.60 / +10.76 / -54.21 / -42.14 -> -55.00 /
+    +11.60 / +10.55 / -58.45 / -49.31 %), KE RMS 29.17 -> 28.83 %; holder
+    force RMS 129.70 -> 92.39 %; the punch (node 40006) DZ = LS nodout at
+    every fifth on both arms (max 0.00000 mm). hemi.draw (t_end 6e-3, n 120
+    (4.94864e-05, 0.00599932]) 5256 -> 4328 cycles (0.8234), IE END -3.46 ->
+    -2.79 %, IE RMS 1.25 -> 0.99 %, KE RMS 39.60 -> 36.19 %.
+    control_adaptive.cup-draw = A1 + A4 + A8 (t_end 7e-4, n 699 (8.39908e-07,
+    6.98827e-04]) 2326 -> 2221 cycles (0.9549), IE END +38.39 -> +39.49 %,
+    IE RMS 12.86 -> 13.02 %, KE RMS 2.67 -> 2.61 %, its three contact forces
+    |FN + FT| 13.49 / 15.40 / 20.79 -> 14.34 / 15.62 / 22.16 % (all worse;
+    FN alone 12.92 / 15.38 / 20.61 -> 13.66 / 15.59 / 21.88 %); the punch's DY = its curve's integral at every fifth on
+    both arms; the minimum printed step 2.53e-7 -> 3.09e-7 stays above A4's
+    Tmin 2.25e-7 (A4 does not engage), MAS.ERR 0. The A9 sentence names the
+    capped interfaces on its two carriers among the movers
+    (control_adaptive.cup-draw and pan.drawbead.31, 90001 / 90002 / 90003).
+    The coupon
+    `tests/fixtures/round10/r10_type7_coupon_quad.k` (the round-10 critic's
+    cq.k: a rigid plate dropping on a 2 mm quad strip) with VisS 1e-6: peak
+    penetration 0.18031 mm = the closed form at K = 21.42747822 (-0.00 %,
+    802 cycles), 0.02809 against 0.02810 at Stmin 1000. Movers: 4 keys / 4
+    models, the 12 Stmax cells of `_0000.rad` (control_adaptive.cup-draw
+    2376.650209, mat_transversely_anisotropic.cup-draw 41130.97918,
+    pan.drawbead.31 7882.991856, hemi.draw 17490.62313); the 22 rigid-side
+    TYPE7 guards checked here (sphere1, forging_A, metal-cutting,
+    EXP_SC_CONTACT_INTERFERENCE, the ring trio and the siblings) are
+    byte-identical. Tests: `tests/test_r14_round10.py` `RigidToolPenaltyCap`
+    (its `test_the_slsfac_sentence_names_the_capped_interfaces` pins A9's cap
+    clause), `Round10FlagWiringA2`; `tests/test_r14_triage_4.py`
+    `RigidPartPredicateTests` counts the cap's call of `rigid_part_ids` (the
+    one rigid-part predicate; contacts.py 3 -> 4 calls).
+  - **A10 - `*INITIAL_VOID` on a CLIS-coupled ALE deck: a LAW6 void copy at
+    1e-3 x RO on its own `/INTER/TYPE18` (2b, default ON;
+    `--no-initial-void-copy`), the CLIS PFAC stiffness (2a, opt-in
+    `--clis-pfac-stiffness`) and a converter-side first-step estimate.** 2b
+    (`writer/blast_ale._resolve_initial_void_copy`, a build_starter prepass
+    right after B10's): every `*INITIAL_VOID_PART / _SET` part in the master
+    (fluid) set of a `*CONSTRAINED_LAGRANGE_IN_SOLID` card is written as a
+    LAW6 copy of its fluid at RHO_I = 1e-3 x RO with its `/EOS` RHO_0 = RO
+    (the round-8 B10 maps: a copy MID from `next_mat_id` when another part
+    shares the `*MAT_NULL`), and `_make_fsi_coupling` moves it out of the
+    fluid's `/GRBRIC/PART` into its own group with a second `/INTER/TYPE18`
+    (the same surface, Gap and times) at the fluid's Stfval x 1e-3. f = 1e-3
+    is a numerical floor of this converter, not a value LS-DYNA states
+    (LS-DYNA empties the part; `*CONTROL_ALE` VFACT is a stress cut-off, Vol I
+    R17 p.12-52); 1e-6 is unworkable on both coupled carriers. Refused by
+    name, no byte: an `*ALE_REFERENCE_SYSTEM_*` deck (bird_B; lifted by the
+    two opt-ins `--ale-flow-tracking --clis-pfac-stiffness`, the measured
+    package), a void not on a `*MAT_NULL` + `*EOS_*` fluid (forging_B), RO <=
+    0, a material B10's void density owns, a coupling whose fluid group would
+    hold only voids. MEASURED (nt 4, README 9.1, n 499 / 500 LS times to t
+    0.07, each arm's bytes in one window): quadrature_B 1094 -> 1109 cycles,
+    KE RMS 28.17 -> 10.42 % (KE fifths -27.91 / -31.06 / -40.22 / -41.38 /
+    -40.68 -> 0.00 / -6.03 / -16.01 / -18.04 / -16.24 %), the named cost IE
+    END +394.00 -> +664.72 %, IE RMS 142.04 -> 161.11 %; quadrature_C (the
+    same bytes, NQUAD 3 in LS-DYNA) KE RMS 29.95 -> 12.37 %, IE RMS 59.26 ->
+    61.33 %. 2a (opt-in): Stfval = PFAC x m_node / dt0^2 - PFAC the STATED
+    cell (`ConstrainedLagrangeInSolid.pfac_stated`, D-11: 0 = LS-DYNA's 0.1,
+    < 0 a load-curve id, refused by name; the folded `pfac` stays for every
+    other reader), m_node the median lumped nodal mass of the coupled fluid,
+    a void copy's or an A7 light-fluid vacuum's own interface x its density
+    ratio; refused on a deck with a LAW0 `*MAT_VACUUM`. dt0 =
+    `writer/blast_ale.clis_dt0_estimate`: Tsca x the smallest starter element
+    step over the elements the engine integrates (8-node bricks by `dtel.F`,
+    4-node QBAT / QEPH shells by `cndleni.F`; `/RBODY` and LAW0 parts left
+    out; refused on a mass-scaled or implicit deck and on every other element
+    family) - the starter's printed steps to every digit on the bricks and to
+    2.5e-8 on the shells (the four fixtures
+    `tests/fixtures/round10/r10_clis_dt0*.k`, starter-run: 0 ERROR(S) / 0
+    WARNING(S)), +0.11 % (bird_B) / +1.77 % (quadrature_B) above the engine's
+    first step, +22.6 % above stagnation_A's on its round-10 bytes (1.776e-6,
+    a nodal step since A7's light fluid; +0.09 % on its part-A-i bytes).
+    MEASURED (nt 4, README 9.1): stagnation_A (the A7 bytes) at Stfval
+    13176.1086 (its light-fluid interface 0.131761086): 9364 -> 9288 cycles,
+    the inflow work (EXT-WORK) 1076 against LS-DYNA's bndout 1254.6 by t
+    2.40e-4 (86 %; 2.519 at the unit stiffness), 1669 against 1303.5 at t
+    0.02 (+28 %), KE RMS 14.40 -> 12.83 %, IE RMS 206.79 -> 223.42 % (n
+    500); quadrature_B (with 2b) at 11.27678492: 1109 -> 1364 cycles, KE RMS
+    10.42 -> 8.71 %, IE RMS 161.11 -> 492.61 % - hence opt-in. The bird_B
+    package (FLOW-TRACKING + 2b + 2a, here the two opt-ins) on the branch
+    bytes at the estimator's Stfval 133.1 = 0.1 x 5.573e-11 / dt0^2: 2935 ->
+    2976 cycles, END IE +1484.66 -> +8.15 %, END KE +25.88 -> -14.44 %, RMS
+    IE 1189.95 -> 6.71 %, KE 253.09 -> 3.37 % (n 600) - the gate arm of the
+    findings' 6.3a (g2_Sest_ash) reproduced to the printed digit, so the next
+    commit makes it the default. Texts: the CLIS sentence's PFAC clause now
+    reads the stated cell and names what the opt-in would write (or why it
+    refuses); the void sentence gets W-A10-2b for a copied void (the
+    full-density "NOT VALID" sentence leaves those decks) or one refusal
+    clause; the ELFORM-12 floor sentence points at the copy; the
+    FLOW-TRACKING sentence names the package. Movers: quadrature_B / _C by
+    bytes (2 keys / 1 model); bird_B, forging_B, stagnation_A / _B,
+    cylinder_impact_B, ale_wavehitcol by text; bird-el (a void without CLIS)
+    byte- and text-identical. OUTSIDE the roster (named by the verification
+    round, findings 6.31 (2)(e)): Ryan_Lee `W12_SETUP_Water_ALE_Elastic` (4
+    files, 1 model) moves by bytes under the 2b default - a LAW6 copy at 1e-3
+    x RO and a second `/INTER/TYPE18` - and no run of it exists: unmeasured.
+    Tests: `tests/test_r14_round10.py`
+    `ClisDt0Estimator`, `InitialVoidCopy`, `ClisPfacStiffness`,
+    `Round10FlagWiringA2`, `Round10OptInWiringA2`; moved, each because A10 2b writes the void copy on a CLIS-coupled *INITIAL_VOID deck (round 10):
+    `tests/test_r14_triage_6.py` `InitialVoidFloorTests.test_ONE_decision_the_warning_reads_the_record_not_the_option`,
+    `.test_the_TYPE18_coupled_void_gets_the_rewritten_warning`,
+    `.test_the_coupled_void_warning_names_a_refused_floor` (the copy's
+    sentence carries the floor clause; the full-density one is
+    `--no-initial-void-copy`'s), and `tests/test_side_defects.py`
+    `TestEveryElementGroupSiteIsGuarded.test_the_guarded_allocator_is_used_at_every_site_it_should_be`
+    (23 -> 24 guarded `next_elem_group_id` sites: the split part's
+    `/GRBRIC/PART`).
+  - **A10 / D-6 - the ALE package is the default (`--ale-flow-tracking` ON;
+    `--no-ale-flow-tracking`).** The findings' 6.3a gate PASSED: the package
+    arm on the branch bytes at the estimator's Stfval reproduced the gate arm
+    g2_Sest_ash to the printed digit (nt 4, n 600: 2976 cycles, END IE +8.15
+    %, END KE -14.44 %, RMS 6.71 / 3.37 %). `--ale-flow-tracking` now
+    defaults to True and is keyed on the PACKAGE: a deck with one accepted
+    `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4 card (round 9's B8 screen,
+    unchanged) AND an `*INITIAL_VOID` part in the fluid set of a CLIS
+    coupling that the void copy writes AND the PFAC stiffness able to apply
+    gets the FLOW-TRACKING card + the void copy (its ARS refusal lifted) +
+    Stfval = PFAC x m_node / dt0^2 on the fluid's `/INTER/TYPE18` (x 1e-3 on
+    the void's), whether or not `--clis-pfac-stiffness` is given
+    (`writer/blast_ale._resolve_ale_flow_tracking` = `_aft_screen` +
+    `_aft_package_refusal`; `_void_copy_ars_refusal`,
+    `_package_stiffness_refusal`). The card ALONE (round 9's opt-in, MIXED on
+    bird_B: KE RMS 253.09 -> 749.89 %) is retired: an accepted card without
+    the package is skipped with the failing condition named, and a deck
+    without a PRTYPE-4 card keeps round 9's per-card sentences. MEASURED on
+    bird_B (README 9.1, its part-A-i bytes and the default in one window):
+    2935 -> 2976 cycles, END IE +1484.66 -> +8.15 %, END KE +25.88 -> -14.44
+    %, RMS IE 1189.95 -> 6.71 %, KE 253.09 -> 3.37 %, cycle-0 KE 101.5 ->
+    11.83 (LS-DYNA 11.737), at Stfval 133.1 = 0.1 x 5.573e-11 / dt0^2 (the
+    bird's median nodal mass; dt0 2.046e-7, +0.11 % above the engine's first
+    step 2.044e-7). The S-sensitivity is the package's stated uncertainty: a
+    0.2 % change of Stfval (133.10 -> 133.39, the round-10 research arms on
+    the ed52c93 bytes) moved END IE by 0.37 point (+8.50 -> +8.13 %).
+    `--no-ale-flow-tracking` = the part-A-i bytes. Movers: bird_B by bytes
+    (1 key / 1 model, `_0000.rad` only: the void copy, the split TYPE18 pair
+    at 133.1 / 0.1331, the FLOW-TRACKING card). Tests:
+    `tests/test_r14_round10.py`
+    `InitialVoidCopy.test_the_package_is_the_default_on_the_ars_deck` and
+    `.test_the_refusals_are_named_and_change_no_byte`, `Round10FlagWiringA2`
+    (the flag moved there from `tests/test_r14_triage_9.py`
+    `Round9OptInWiringB`, now empty), `Round10RetractedStatementsA2` (F-A10b
+    flips to a replacement: `--no-ale-flow-tracking` is shipped); moved
+    because A10's package makes FLOW-TRACKING a default on its key class
+    (round 10): `tests/test_r14_triage_9.py`
+    `AleFlowTracking.test_card_bytes_bcrot0_and_bcrot7` (the package deck;
+    the card alone writes nothing),
+    `.test_generic_control_ale_note_follows_the_plan`,
+    `.test_every_refusal_class` (PRTYPE 0 / 3 / 5 keep the per-card
+    sentence), `Round9FlagsInReadme.test_every_round_9_flag_is_in_README_prose`
+    (17 -> 16 spellings).
+- **R14 CAMPAIGN PARITY batch, round 10 - part A-i (shells and sections, the
+  time step, implicit, the erosion and few-node texts).** One commit per item;
+  every later item of the round is measured on the bytes of the earlier ones
+  (A1 first). The movers below are the part-A-i research sweep of all 356 R14
+  roster keys (= 312 emitted models) through the prototype of this code,
+  every changed line classified by cell, 0 unattributed; the shipped commits
+  write the same bytes as that prototype on every emitted file of the 356
+  keys (sha256, 713 files). In all part A-i moves the bytes of 167 keys / 146
+  models (A1 148 / 132, A2 1 / 1, A4 8 / 8, A5 21 / 16; 11 keys by two
+  items) and the warning text of 189 keys / 169 models; the campaign pass on
+  the branch (report section 0.36) replaces them by its own measurement.
+  - **A1 - `*SECTION_SHELL` SHRF -> `/PROP/SHELL` Ashear, by default
+    (`--no-shrf-ashear` writes Ashear 0 everywhere).** A blank or 0 SHRF is
+    written as LS-DYNA's default 1.0 (Vol I R17 p.41-63), 0 < SHRF <= 1 as
+    stated, a value within 0.005 of 5/6 keeps the cell 0 (the starter's own
+    5/6, `hm_read_prop01.F:244`: the ~5/6 sections keep their bytes; a 0.83 is
+    named as a 0.40 % substitution), a value outside (0, 1] is written 1.0 and
+    named. The cell stays 0 on NIP 1 (one point, no bending, p.41-66; on
+    the N-1 property of a triangle-only NIP-1 section the starter zeroes
+    Ashear itself, `hm_read_prop01.F:246-259`, and the engine integrates no
+    transverse shear, `c3coef3.F:134-137`; a NIP-1 section kept at N 2 runs
+    at the starter's 5/6), on the membranes ELFORM 5 / 9 and the 2-D ELFORMs
+    12-15 / 43 / 44 / 52 / 55 / +-29 (p.41-67) - with its own sentence (the
+    fix round reworded it: it said LS-DYNA does not shear these sections
+    transversely, which no manual page states for NIP 1) - and on k2rad's
+    own placeholder
+    sections (`SectionShell.card_given`); BCIZ / DK (ELFORM 3 / 17 / 18) take
+    the rule and are named. One rule (`writer/mesh._shrf_rule`) writes the
+    cell at both emission sites (the per-section `/PROP/SHELL` and the
+    per-part `*HOURGLASS` split) and selects every sentence. The K-32 "SHRF is
+    NOT converted" note is gone from the default path; `--no-shrf-ashear`
+    names every section that then runs at 5/6 where LS-DYNA does not, stated
+    AND blank. The `/PROP/TYPE9` / `TYPE11` / `TYPE51` routes are untouched
+    (a ROADMAP item). MEASURED: each Ashear reproduces its own Timoshenko
+    closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on clamped quad
+    cantilevers (64 runs: LAW1 N 0 / N 5 / LAW2 / LAW36 / LAW44, Ishell 24 /
+    12 / 1 / 4, implicit, nt 4 = nt 2) and to -0.024 / -0.025 % on a `/SH3N`
+    strip (16 runs, 16633 = 16633 cycles); LS-DYNA's d3hsp echoes `shear
+    area factor = 1.00000E+00` on all 2642 R14 shell parts whose section
+    states SHRF blank, 0 or 1.0. Movers: 148 R14 keys / 132 models by bytes
+    (the `_0000.rad` Ashear cells only, the `_0001.rad` never), 6 keys / 6
+    models by text only. The 14 match rows among them stay match (26 runs,
+    largest END move 1.54 points: sphere1 IE END -1.66 -> -0.12 %; cycle
+    ratios 0.9990 - 1.0006); 0 status or verdict flips on 40 measured
+    deviation / not_comparable keys. Four rows move AWAY from LS-DYNA,
+    named (the campaign pass, report section 0.36, nt 4): contact.edge IE END
+    -14.17 -> -24.16 % and KE END +13.67 -> +15.89 %, thick IE END -27.21 ->
+    -33.54 %, transducer KE RMS 15.19 -> 17.28 % (n 947 / 948) while its IE
+    RMS improves 18.66 -> 17.32 % (IE END +39.12 -> +42.52 %), and
+    constrained.spotweld.plates at its END only - IE +55.64 -> +89.06 %, KE
+    +30.96 -> -76.40 % (the scored KE, translational + rotational, 979.49 ->
+    176.48 against LS-DYNA's 747.951; IE 3428 -> 4164 against 2202.51). Its
+    cause, measured: the two OpenRadioss runs agree within 0.10 % in IE up to
+    t 6.0e-3; the welds release at t 0.006221 (cycle 16893) on the Ashear-0
+    bytes and at t 0.006200 (cycle 16834) on the Ashear-1 bytes - 21 us
+    earlier (LS-DYNA fails them at 0.0054408 .. 0.0054475, a gap older than
+    round 10 that A1 does not touch); after the release IE and KE ring and the
+    END row samples another phase of it; over the whole history the row
+    moves TOWARD LS-DYNA (IE RMS 34.01 -> 30.61 %, KE RMS 34.29 -> 24.10 % of
+    the LS peak, n 800, window (8.40907e-06, 0.00799978]); its one-twin band
+    (Ashear 1 -> 1.000001) is 0.0 points, so the move is A1's. With them
+    airbag-ii's airbag.deploy KE END +7.38 -> +8.41 % (1.0313 points against
+    its one-twin band of 1.031). The band carriers, ONE eps twin each (Ashear
+    1 -> 1.000001, nt 4; a one-twin band is a LOWER bound of the scatter; max
+    band 45.40 / 12.90 / 13.94 / 3.57 points on ring_01 / ring_1 / ring_100 /
+    airbag-ii): the ring trio's IE END moves lie inside their bands (ring_01
+    21.52 against 45.40, ring_1 4.24 against 8.95, ring_100 4.13 against 8.72
+    points); the trio's KE END moves (about 0.24 points) and one RMS metric
+    each, and all four airbag-ii metrics (IE END 4.4082 against 3.5742, KE END
+    1.0313 against 1.031, IE RMS 0.66 against 0.21, KE RMS 0.32 against 0.07
+    points - every one under 4.5 points) are not covered by a one-twin band:
+    6 metric moves inside, 10 outside over the four carriers.
+    Outside the roster all 28 of the 28
+    shell-carrying CardStack run decks move: `run_03` .. `run_21` state SHRF
+    1.0 on ELFORM 16 NIP 5 T 0.35 mm, `run_22` .. `run_26` leave it blank on
+    ELFORM 2 (the user's pipeline: the round does not edit its recipe). The 4
+    starter goldens `implicit_qstat`, `rigid_contact`, `shell_explicit`,
+    `tied_weld` move in 5 Ashear cells `0` -> `1`; the historical-bytes pins
+    hold the lever off (`_K3_OFF` += `shrf_ashear=False`, the K3 pattern) and
+    `_k3_default_moves` names the cell. Tests: `tests/test_r14_round10.py`
+    `A1ShrfAshear`, `Round10RetractedStatementsA`, `Round10FlagWiringA`;
+    `test_cardstack_pipeline.SectionShellShrf.test_shrf_moves_only_the_ashear_cell`,
+    `test_cardstack_pipeline_props.GoldenFixtureMoves.test_round10_a1_moves_only_the_ashear_cells`,
+    the rewritten `ShrfNote`.
+  - **A2 - NIP 1 -> `/PROP/SHELL` N 1 on a triangle-only section, by default
+    (`--no-nip1-one-point` writes max(2, NIP)).** A `*SECTION_SHELL` with
+    NIP 1 (stated, or a one-point `*INTEGRATION_SHELL`), a 3-D ELFORM and
+    shell elements that are all triangles is written N 1: LS-DYNA's one
+    point, no bending (Vol I R17 p.41-66; the belted dummy's d3hsp echoes 1
+    integration point), which no starter switch touches (`c3grtails.F:710`)
+    and on which the starter zeroes Ashear itself (`hm_read_prop01.F:246-259`).
+    Until now such a section was written N 2, which the starter runs as N 0
+    global integration on LAW1 (`cgrtails.F:780-791`): a shell that bends.
+    Kept at N 2 and named: a NIP-1 section with quadrilaterals (the one-point
+    quads of this OpenRadioss build diverged in the round-10 probes: QBAT at
+    cycles 81-88 on a cantilever at the default step, QEPH on an elastic
+    airbag) and a section an initial-state record names (writer/inistate's
+    `/INISHE` stations are written for max(2, NIP)). Both emission sites carry
+    the N (`writer/mesh._nip1_one_point_secids`); writer/composites' dropped
+    LAW1 `*INTEGRATION_SHELL` sentence names the N = 1 written. MEASURED: a
+    `/SH3N` cantilever (L 100, t 2 mm, P 2 N) on the shipped default bytes
+    (97537 cycles, nt 4) - the NIP-1 strips hang (tip -81.9 .. -82.7 mm, the
+    hold-window means -82.747 / -81.946 / -81.905 / -81.905 mm of strips 1 /
+    4 / 8 / 9) where N 2 bends (-0.476139 mm, Euler-Bernoulli 0.47619 mm; the
+    -81.76 mm first shipped was a hand-edited census arm's, fix round); on
+    `mat_spring.belted-dummy`, the one R14 carrier
+    (1 key / 1 model; `/PROP/SHELL/20` and `/21` N 2 -> 1), with A1 on the
+    same bytes: 110032 cycles = base, IE END +65.73 -> +46.57 % (fifths
+    +29.27 / -2.01 / +3.85 / +58.71 / +46.57 at t 0.024 .. 0.12), IE RMS
+    22.79 -> 14.23 % of the LS peak over its 500 LS times (0.00023912,
+    0.119997], KE RMS 2.24 = 2.24 %, KE at the 4th fifth +165.47 -> +177.22 %
+    (farther, named); the driven belt nodes 1763 / 1997 DX = LS nodout within
+    0.05 mm at every fifth (nt 4). Text-only: ex_20 (NIP-1 ELFORM 16 quads,
+    named). Tests: `tests/test_r14_round10.py` `A2Nip1OnePoint`;
+    `Round10FlagWiringA` += `--nip1-one-point`.
+  - **A3 - the texts that ride A1 / A2 (0 bytes, 0 warning records).** The
+    `--law1-shell-global-n` help names all five K-31 conditions of
+    `writer/mesh._law1_global_n_secids` (it named the `*INITIAL_STRESS_SHELL`
+    exclusion only): LAW1 parts incl. `*MAT_RIGID` written as `/MAT/ELAST`,
+    not NIP 1, no `*INITIAL_STRESS_SHELL` / `*INITIAL_STRAIN_SHELL` record
+    (also through a `*SET_SHELL`), no other law on the section, no
+    `/THERM_STRESS` deck; the README K-31 bullet says so. The
+    `_ELFORM_ALWAYS_QEPH` comment (`writer/common.py`) gives the measured
+    reason instead of the wrong one: LS-DYNA calls ELFORM -16 / 9 / 20 / 21 /
+    26 FULLY integrated (Vol I R17 p.41-64) and dyna2rad writes them Ishell 12
+    (`convertprops.cxx:781-783`), but Ishell 12 worsens the internal-energy
+    RMS on all three explicit R14 ELFORM 9 carriers (tire-compression 8.59 ->
+    9.50 %, the two airbag.deploy decks 12.63 -> 21.94 % and 43.78 -> 50.35 %
+    of the LS peak, nt 4) and on the two fabric airbags runs QBAT at N 1, the
+    one-point path measured unstable (ENERGY ERROR at cycles 81-88); the
+    `--shell-formulation` help names the fixed list. The `--tet-isolid1`
+    help, the `convert()` docstring and the ConvertOptions comment cite the
+    starter's tet reset as `sgrtails.F:984-999` (line 1000 is a comment
+    line), and the help, the `_tet_section_isolid` docstring and README say
+    that an all-tet ELFORM 2 / 16 section keeps its Isolid 17, which the
+    starter resets the same way (measured on `3.1_Elastic_Beams_etc`: every
+    printed cycle row equal to an Isolid-1 twin's, nt 1, six pairs). Moved
+    pin: `test_cardstack_pipeline.FixRoundHelpTexts.test_tet_isolid1_names_the_starters_own_tet_reset`
+    re-pinned to `:984-999`. Tests: `tests/test_r14_round10.py` `A3Texts`
+    and the A3 needles of `Round10RetractedStatementsA`.
+  - **A4 - K-41: `/DT/NODA/CST` Tmin = TSSFAC x |DT2MS| is the default
+    (`--no-dt2ms-tssfac-product` writes |DT2MS|); `/DT/AMS` keeps |DT2MS|.**
+    An explicit DT2MS < 0 deck now holds its mass-scaled step at the minimum
+    step LS-DYNA permits, TSSFAC x |DT2MS| (Vol I R17 p.12-585; TSSFAC blank
+    or a curve = 0.9), the cell dyna2rad writes (`convertcards.cxx:173-174`),
+    instead of |DT2MS|, a floor 1/TSSFAC higher. The flag governs
+    `/DT/NODA/CST` only: `/DT/AMS` (`--ams`) writes |DT2MS| on both arms, as
+    dyna2rad does (`convertcards.cxx:233-234`) - it used to take the product
+    under the opt-in, and no AMS run measured it - and the `--ams` warning no
+    longer cites `/DT/NODA/CST`'s nodal rule (dtnoda.F) for an AMS run, whose
+    step the engine computes in DTNODAMS (`resol.F:5847-5857`). MEASURED on
+    `control_timestep.billet-forge` (DT2MS -1.2e-7, TSSFAC blank; A1's rigid
+    die cell on the same bytes, inert; nt 4): 12500 -> 13889 cycles (=
+    LS-DYNA's 13889, d3hsp; ratio 1.1111), the OR step 1.08e-7 = LS-DYNA's in
+    151 / 151 glstat blocks, KE END +16.99 -> -5.13 % (fifths -3.84 / -2.35 /
+    -1.37 / -1.93 / -5.13), KE RMS 8.54 -> 1.74 % of the LS peak over its 150
+    LS times (9.936e-6, 1.49991e-3], IE END +0.1348 % on both arms, the
+    driven die `/TH/NODE/90024` DZ = the integral of LCID 1 at every fifth -
+    the round's one verdict flip, deviation -> match (MEASURED in report
+    §0.36). It is a match of two MASS-SCALED runs (named by the verification
+    round, findings 6.30 (4)): LS-DYNA adds 199.18 % of its physical mass
+    2.24e-5 by the deck's own DT2MS (glstat's last block, added mass
+    4.4617e-5), OpenRadioss 248.2 % on the `ed52c93` bytes (MAS.ERR 2.482,
+    5.561e-5 at cycle 12500) and 182.7 % on these (1.827, 4.092e-5 at
+    cycle 13889), and the skill launcher's strict audit refuses the row on
+    both byte sets (FLAG added-mass). The named
+    cost: `07_metalstrip` (DT2MS -1e-4, TSSFAC 0.5; not_comparable, LS IE a
+    structural zero) runs x2.000 cycles (20000, LS 20001), its added mass
+    +167.08 -> -33.22 % of LS-DYNA's 0.5485 t at every fifth, KE END -93.73
+    -> -98.43 %. Movers: 8 R14 keys / 8 models, the `_0001.rad` Tmin cell
+    only (billet, metal strip, control_adaptive.cup-draw, EXP_SC_JOINT_SCREW,
+    8.1 / 8.2 / 8.3 plate decks, the self-forging rivet giant); the screw and
+    the cup-draw never reach the floor (rows identical), nor do 8.1 / 8.2 (0
+    of 238417 rows with added mass); the 5 implicit DT2MS < 0 keys write no
+    `/DT/NODA/CST` on either arm. Outside the roster 58 getriebekette files
+    and the CardStack archive's 39 explicit DT2MS < 0 files move their Tmin
+    cell; three of the user's own files map a quoted Tmin to DT2MS one to one
+    and are now off by 1/TSSFAC (DT2MS = -Tmin / TSSFAC): the CardStack recipe
+    section 8, `fem-pipeline/scripts/results_check.py:193` / `:246` (the
+    verification round corrected the cited line: `:201` is MOTION_FIX) and
+    `run-openradioss/scripts/audit_or_run.py:992` - not edited by this
+    round. Moved pins (re-derived, the product hand-computed):
+    `test_cardstack_pipeline` `_BOOL_LEVERS` row -> True (NewLeversWiring x4,
+    NewLeversGui); `test_cardstack_pipeline_engine.Dt2msTexts`
+    `test_default_text_states_the_step_and_names_the_flag` (0.9 x 1e-6 =
+    9e-7), `test_default_text_says_a_nodal_step_below_tmin_is_lifted` (+ the
+    opt-out arm), `test_flag_text_states_the_product` -> 
+    `test_the_ams_text_keeps_dt2ms_on_both_arms`, the routed-deck off-route
+    needle `(Tmin=9e-05)` (+ the opt-out's `(Tmin=0.0001)`);
+    `test_control_timestep.Dt2msTssfacProductTests`
+    `test_default_keeps_tmin_at_dt2ms` -> `test_default_holds_tmin_at_the_product`
+    + `test_the_opt_out_keeps_tmin_at_dt2ms`, `test_flag_on_the_ams_branch` ->
+    `test_ams_keeps_tmin_at_dt2ms_on_both_arms` (9e-7 -> 1e-6),
+    `test_negative_tssfac_curve_takes_0_9` (the AMS + flag row 1e-6),
+    `MassScalingPathUnchangedTests.test_still_emits_noda_cst_with_tssfac_as_tsca`
+    (0.8 x 1.112e-6 = 8.896e-7); `test_converter.MassScalingTests`
+    `test_tmin_is_abs_dt2ms` -> `test_tmin_is_tssfac_times_abs_dt2ms` (0.9 x
+    1.112e-6 = 1.0008e-6). `docs/K_ROUTE_FOR_RADIOSS_CARDS.md`'s K-41 rows
+    are re-texted after the merge of master (its 6.3 / 6.4 / 6.7 / 6.8
+    records were measured at Tmin = |DT2MS|).
+  - **A5 - the end fix point on dynamic implicit decks, by default
+    (`--no-implicit-end-fixpoint` writes none).** A dynamic implicit deck
+    (`/IMPL/DYNA/2`, the `/IMPL/DT/2` step card, not `--arclength-riks`)
+    without a `--fixpoint-count` grid gets ONE `/IMPL/DT/FIXPOINT` at its end
+    time - byte for byte the two lines `--fixpoint-count 1` writes (a stated
+    `--fixpoint-count 0` is the default; on an IMFLAG-curve segment the point
+    is the segment's own `/RUN` end). Why: under `/IMPL/DYNA` the engine does
+    not clip an increment to the remaining time (`imp_dt.F:53-56`; a static
+    run clips its last step, `:55`, and static decks are untouched) and stops
+    at the first cycle past the end (`resol.F:8317-8318`, `:8470`), so an
+    adaptive run could end NORMAL one increment below ENDTIM; `IMP_DTF`
+    (`imp_dt.F:302-321`) lands it on the fix point. MEASURED (census g2g /
+    critic G2 from k2rad's own `fixpoint_count=1` conversion, nt 4 = nt 2):
+    the 9 keys / 5 models that ended below their end time reach it at +1
+    cycle with fifths 1-4 unchanged, and the END value - read AT the end time
+    now - moves both ways: `ex_14_solid_elform_1` 34 -> 35 cycles, IE END
+    -14.44 % (t 0.01839) -> -33.66 % (t 0.02), IE RMS 4.61 % (n 183) / 4.51 %
+    (n 200); `ex_11_beam_elform_1` KE END +1343.37 -> -78.46 %;
+    `ex_14_solid_elform_2` IE END +213.83 -> -0.28 %, KE END +129.12 ->
+    +784.18 %; the decks that already landed on the end time print the same
+    rows. No "gain" is claimed. The sliver: `IMP_DTF` cuts the step to the
+    remainder whatever its size (`imp_dt.F:311-320`), so where the remainder
+    is a sliver of the step the LAST row is an integration artifact - on
+    `efg/metal-cutting/main.k` (step 2.0e-4 cut to 1.0e-5, ratio 0.05) the
+    last row's KE 52.3 .. 111.0 -> 3.57e8 .. 6.06e8 and ERROR 99.9 % at t
+    0.03 over four runs of the same bytes at nt 4 (the A-i spec 91.3 ->
+    6.06e8, this implementation 111.0 -> 5.52e8, the campaign's 0.36 run
+    60.77 -> 4.562e8, the physics-A verifier 52.26 -> 3.565e8 - the listing
+    does not repeat digit for digit; the verification round restated the
+    single sample as this range), on a 2 x 2 x 2-hex probe (2.0e-3 cut to
+    1.05e-4, ratio 0.06) KE 0.160 -> 170.1, ERROR -99.9 %, on that probe
+    with ENDTIM 0.0201 (ratio 0.115) KE 0.160 -> 37.16; the R14 stop rows' remainders
+    are 62 - 85 % of the step (clean last rows). Movers: 21 R14 keys / 16
+    models by the two engine lines (18 runnable + 3 giants); 0 status /
+    verdict moves (MEASURED in report §0.36). Tests:
+    `tests/test_r14_round10.py`
+    `A5EndFixpoint` (the bytes of `fixpoint_count=1`, the opt-out = 2 lines
+    fewer, the sentence, static / RIKS / a 4-point grid untouched);
+    `Round10FlagWiringA` += `--implicit-end-fixpoint`. No existing pin moves.
+  - **A6 - the starter `/DAMP` is inert on an implicit run: named by default;
+    `--implicit-rayleigh-damping` (opt-in) writes `/IMPL/DYNA/DAMP`.** k2rad
+    writes `*DAMPING_GLOBAL` (LCID 0) as the starter `/DAMP`, on implicit
+    decks too, and an implicit run never applies it (Reference Guide 2022
+    `/IMPL/DYNA/DAMP` comment 2: "/DAMP defined in Starter has no effect on
+    implicit run"; the engine's only `CALL DAMPING`, `resol.F:7216-7219`,
+    sits in the explicit block `resol.F:6406` / `:6547` skip): every implicit
+    deck that carries a `/DAMP` now says so, once (a new starter registry,
+    `writer/assembly._register_damp_cards`, reads the `/DAMP` headers the
+    damping sections wrote; `ConversionState.damp_cards`). The opt-in writes
+    `/IMPL/DYNA/DAMP` alpha = VALDMP x ST, beta 0 right after `/IMPL/DYNA/2`
+    (`imp_dyna.F:1810-1828`: alpha x M x V = LS-DYNA's Ds m v; ST the common
+    STX .. SRZ, all 0 = unity, Vol I R17 p.15-9) and keeps the starter
+    `/DAMP`; it refuses by name a static deck (the card alone turns the run
+    dynamic, `freimpl.F:171`), an LCID > 0, an uneven STX .. SRZ,
+    `*DAMPING_PART_*` cards and VALDMP <= 0. MEASURED (census g2g / critic G2,
+    nt 4 = nt 2): deleting the `/DAMP` changes no printed figure of
+    `ex_14_solid_elform_1`; the card is consumed (engine echo `IMPLICIT
+    RAYLEIGH DAMPING COEFFICIENTS`) and brings LS-DYNA's own step nearer the
+    reference (ex_14 IE RMS 11.94 -> 10.38 %, ex_15 elform_5 5.07 -> 3.43 % of
+    the LS peak), but on the step k2rad ships (adaptive + the A5 end fix
+    point) it worsens the internal energy of both carriers - ex_14 IE RMS 4.51
+    -> 5.27 %, KE RMS 2.66 -> 7.56 % over its 200 LS times; ex_15 elform_5 IE
+    RMS 5.31 -> 6.58 % - so the card is an opt-in and no sentence calls it a
+    gain. Movers: 0 bytes by default; the sentence on 8 R14 keys / 3 models
+    (ex_14 elform -1 / -2 / 1 / 2 / 3, ex_15 elform 2 / 3 / 5). Tests:
+    `tests/test_r14_round10.py` `A6ImplicitDamping` (the default sentence,
+    static and dynamic; the opt-in card and its two engine lines; the three
+    refusals; the uniform 0.5 x 11.535 = 5.7675) and `Round10OptInWiring`; the
+    README section `--implicit-rayleigh-damping`, docs/IMPLICIT.md.
+  - **A11 - the erosion floor reads the right LS-DYNA field: ERODE 1 + TSLIMT
+    > 0 is no deletion floor (default; `--no-erode-tsmin-rule` restores it),
+    TSLIMT / ERODE / DTMIN named, the TSSFAC Tmin text corrected, a TSSFAC
+    curve named.** `writer/assembly._make_engine_dt_deletion` wrote
+    `/DT/{SHELL,SH_3N,BRICK}/DEL` Tmin = TSLIMT whenever ERODE was 1 and
+    TSLIMT > 0. TSLIMT is LS-DYNA's shell minimum time step ASSIGNMENT - the
+    moduli (not the masses) of `*MAT` 3 / 18 / 19 / 24 shells are modified so
+    the step stays above it (Vol I R17 p.12-584 / 12-585), never an erosion
+    floor - and ERODE erodes below tsmin = DTMIN x dtstart of
+    `*CONTROL_TERMINATION` (p.12-558; p.12-586 / Remark 6 p.12-590), LS-DYNA's
+    own initial step, which k2rad does not compute. MEASURED on the census's
+    per-family coupons (ERODE 1, TSLIMT 1e-7): those cards deleted 10 of 10
+    bricks at t 2.988e-4 (closed form 2.990e-4), 2 shells at 3.736e-4 and 2
+    triangles at 2.404e-4, where LS-DYNA's closed form deletes none (its
+    tsmin is 0); the default now writes the v0 bytes, whose runs delete
+    nothing. One recognized-not-emitted record names both fields
+    (`_note_erode_tslimt`; one record because the log deduplicates on the
+    keyword): the TSLIMT semantics with the DT2MS interplay, and the ERODE
+    classes by digit with the deck's DTMIN. The `*CONTROL_TIMESTEP` TSSFAC
+    sentence's Tmin clause (100 R14 keys / 88 models, 22 match rows among them
+    by text only) said "Tmin=0 (no lower bound) because LS-DYNA TSLIMT is not
+    converted" - wrong twice; it now says the `/DT` card neither stops nor
+    deletes and reads DTMIN (`_tsmin_clause`: 0 on 98 of the 100, birdball's
+    0.3 and 2Dlag's 0.001 named as not converted). A TSSFAC < 0 curve on a
+    DT2MS >= 0 deck used to vanish without a word: it is named with its range
+    over 0 .. ENDTIM (`_tssfac_curve_sentence`; `/DT` has no curve input,
+    `freform.F:1033-1043`; a constant-0.5 probe stepped 1.8x the asked step).
+    Deviation from the part-A-i prototype, a documented defect: the range is
+    read from the stored curve points, which `handle_define_curve` already
+    scaled and offset - the prototype applied SFA / SFO / OFFA / OFFO a
+    second time (pinned by `A11Texts.test_the_curve_range_is_the_stored_points_once_scaled`).
+    The LS-faithful erosion card (ERODE digits -> the element classes, Tmin =
+    DTMIN x dtstart) is NOT built: it needs LS-DYNA's dtstart, and the two R14
+    carriers (birdball, 2Dlag) erode nothing in LS-DYNA's own runs. Movers: 0
+    bytes on the R14 roster (0 decks state TSLIMT != 0); text 100 keys / 88
+    models; birdball and 2Dlag swap the half-request record for the ERODE
+    record. Moved pins: `tests/test_dt_deletion_floor.py` (`TestTheDeckAsking`
+    on the `--no-erode-tsmin-rule` arm, `TestOrderingAgainstMassScaling` on
+    `dt_del=3.5e-8` and the legacy arm, new `TestTheDeckAskingRound10`);
+    `test_cardstack_pipeline_engine.Dt2msTexts` (`_OLD_DT2MS0_TEXT` ->
+    `_DT2MS0_TEXT`, `test_dt2ms_zero_keeps_the_old_text_byte_for_byte` ->
+    `test_dt2ms_zero_text_byte_for_byte`, the coexistence test on `dt_del`
+    and the legacy arm, the routed-deck tests on `erode_tsmin_rule=False`,
+    new `test_the_default_erode_and_tslimt_write_no_floor`);
+    `test_r14_triage_8.AdaptiveSpringToken.test_7_inert_without_compensation_and_the_opt_out`
+    swaps the new clause back before hashing (the 4f5b6e8 SHA stands). New:
+    `tests/test_r14_round10.py` `A11Texts`, the A11 needles of
+    `Round10RetractedStatementsA`, `Round10FlagWiringA` += `--erode-tsmin-rule`.
+  - **A12 - `--dt-del` on a deck routed to the 2-D axisymmetric deck writes
+    `/DT/QUAD/DEL`.** The routed deck's elements are `/QUAD`; the three 3-D
+    cards `--dt-del` wrote there set IDTMIN(3) / (7) / (1) and never reach a
+    quad (`mqviscb.F:449` reads IDTMIN(ITY), ITY 2 for quads; only
+    `/DT/QUAD/DEL` sets IDTMIN(2), `freform.F:1103-1106`). Now the routed
+    deck gets `/DT/QUAD/DEL` alone, Tsca = the deck's TSSFAC else the 2-D
+    default 0.67 (`contrl.F:1148`) - never the 3-D 0.9, which changes the
+    quad step x1.343 (18468 vs 24807 cycles) and then deletes nothing.
+    MEASURED (census g2f, nt 4) on `metal-forming` with Tmin 3.0e-5: quad 7
+    deleted at cycle 23478, t 1.562 (`-- DELETE SOLID ELEMENTS 7`), IE END
+    -0.45 -> -5.41 % against LS-DYNA (500 LS times), the punch moving as
+    LS-DYNA's; the shipped bytes differ from that hand card only in the
+    printed form of the same number (`3.000000E-05` vs `3.0E-5`). ERODE never
+    writes the card (LS-DYNA's ERODE does not erode its 2-D elements,
+    2Dlag.d3hsp). Movers: 0 R14 (no roster conversion passes `--dt-del`).
+    Tests: `test_cardstack_pipeline_engine.Dt2msTexts.test_dt_del_on_the_routed_2d_deck_writes_the_quad_floor`
+    (the card bytes `0.67 3.000000E-05`, a stated TSSFAC 0.5, none of the 3-D
+    cards, the sentence), `tests/test_r14_round10.py` `A12QuadFloorHelp`.
+  - **A13 - the routed implicit N2S caution widened to the ELASTIC base (text
+    only).** The round-9 caution of the default `--implicit-n2s-type7` route
+    (`writer/contacts._N2S_TYPE7_MEASURED`, the `--implicit-n2s-type7` help,
+    README) named the silent pass-through behind a NORMAL TERMINATION for a
+    four-node block on a coarse RIGID base only. MEASURED (census g3l and
+    critic G3 on identical bytes, nt 4 and nt 2): a one-hex block, its four
+    bottom nodes the secondary side, driven onto a 2 x 2-hex ELASTIC base
+    ended in 5 of 7 runs NORMAL TERMINATION with the block through the base,
+    in 1 NORMAL with the block held and in 1 ERROR TERMINATION on the
+    implicit TIMESTEP LIMIT - an outcome that varies run to run; a
+    frictionless nine-node block pressed onto an elastic base sat 0.02 mm
+    inside it with zero contact work behind a NORMAL TERMINATION (nt 4 =
+    nt 2). Both decks are repo fixtures now
+    (`tests/fixtures/round10/b6t_g3l.k`, `slide_mu0.k`, the census decks
+    byte for byte) pinned by their converted BYTES (four SHA-256, the ed52c93
+    ones: 0 bytes move) and the caution's TEXT - no solver outcome is pinned
+    anywhere. Movers: text on 1 R14 key / 1 model (doorbeam, the route's
+    only roster carrier). Tests: `tests/test_r14_round10.py` `A13N2sCaution`;
+    the round-9 pins `test_r14_triage_9.ImplicitN2sType7` and the README
+    needles stay green.
+  - **A14 - `*DATABASE_EXTENT_BINARY` MAXINT -3 .. -1 named (text only).**
+    `handle_database_extent_binary` named MAXINT > 3 (K-42) and MAXINT < -3;
+    -3 .. -1 passed in silence although they ask for the same thing - |MAXINT|
+    through-thickness points at every in-plane point, no averaging (Vol I R17
+    p.16-67). They are named now: the engine deck keeps STRESS/MEMB / UPPER /
+    LOWER (the bytes MAXINT 3 gets), and OpenRadioss writes UPPER / LOWER as
+    the mean over the element's NPTR x NPTS in-plane points
+    (`tensorc.F:179`, `:835-840`), so LS-DYNA's per-point output is not
+    reproduced. Movers: text on 4 R14 keys / 4 models (3.1_Elastic_Beams_etc,
+    3.4_Connectors_CNRB_Interpolation, 3.5_Linear_Elastic_QS_Plate_Shell,
+    4.2_Buckling_of_Beer_Can - all MAXINT -3 on fully integrated sections);
+    0 bytes. Moved pin, split (the claim it asserted ends here):
+    `test_cardstack_pipeline.DbExtentBinaryMaxintNamed.test_maxint_3_or_blank_or_minus_3_say_nothing`
+    -> `test_maxint_3_or_blank_say_nothing` ("", 3, 2, 0) + the new
+    `test_maxint_minus_3_to_minus_1_is_named` (-3 / -2 / -1: the MAXINT-3
+    bytes, one sentence with its citations).
+
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted
   only the mesh with k2rad and appended hand-written `/GRAV`, `/DAMP`,

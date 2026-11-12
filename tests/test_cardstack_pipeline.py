@@ -137,6 +137,12 @@ _PIN_STARTER = ("44626ef238d8b7f0b40dc66861bba8eab6c3698091f0f5d6212751693e"
                 "2d4891")
 _PIN_ENGINE = ("6d9f5932bc54f3ea642930434d1d4c0646476b327bfe37822a34841d9dd"
                "471b6")
+# R14 round 10, A1: the plain deck's starter by default - _PIN_STARTER with
+# the shell plate's /PROP/SHELL Ashear cell 0 -> 1 (its SHRF is blank, LS-DYNA's
+# 1.0); --no-shrf-ashear keeps _PIN_STARTER. MEASURED on the round-10
+# prototype (resA1 pin_probe.py); the engine file does not move.
+_PIN_STARTER_R10 = ("0fc77e23500453dd83d6ccc69c2347d74804f8b1507172acffa4f0"
+                    "59ddbba0fd")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -362,8 +368,10 @@ class ControlUnitsBeginLabels(unittest.TestCase):
 class SectionShellShrf(unittest.TestCase):
     """Card 1 is SECID ELFORM SHRF NIP ...: SHRF is field 3, recorded as
     STATED (0.0 = blank), the convention of SectionTshell / *PART_COMPOSITE.
-    Not converted yet (Ashear stays the starter's 5/6, ROADMAP round 10),
-    so the bytes do not move."""
+    Since R14 round 10 (A1) it is the /PROP/SHELL Ashear cell (columns
+    41-60): a blank as LS-DYNA's 1.0, a value within 0.005 of 5/6 as the
+    starter's own 5/6 (the cell 0); --no-shrf-ashear writes 0 everywhere.
+    Only that cell moves."""
 
     def test_stated_shrf_is_read(self):
         st = _dispatch(_deck(shrf="0.8333"))
@@ -372,11 +380,25 @@ class SectionShellShrf(unittest.TestCase):
     def test_blank_shrf_is_zero(self):
         self.assertEqual(_dispatch(_deck()).sec_shells[2].shrf, 0.0)
 
-    def test_shrf_changes_no_byte(self):
-        _r, s1, e1 = _convert(_deck(shrf="0.8333"))
-        _r, s0, e0 = _convert(_deck())
-        self.assertEqual(_sha(s1), _sha(s0))
-        self.assertEqual(_sha(e1), _sha(e0))
+    def test_shrf_moves_only_the_ashear_cell(self):
+        _r, s_off, e_off = _convert(_deck(), shrf_ashear=False)
+        self.assertEqual(_sha(s_off), _PIN_STARTER)
+        for shrf, cell in (("", "1"), ("0.7", "0.7"), ("1.0", "1"),
+                           ("0.8333", "0")):
+            with self.subTest(shrf=shrf):
+                _r, s1, e1 = _convert(_deck(shrf=shrf))
+                self.assertEqual(_sha(e1), _sha(e_off))
+                lo, ln = s_off.splitlines(), s1.splitlines()
+                self.assertEqual(len(lo), len(ln))
+                moved = [(a, b) for a, b in zip(lo, ln) if a != b]
+                if cell == "0":
+                    self.assertEqual(moved, [])
+                    continue
+                self.assertEqual(len(moved), 1, moved)
+                a, b = moved[0]
+                self.assertEqual((a[:40], a[60:]), (b[:40], b[60:]))
+                self.assertEqual((a[40:60].strip(), b[40:60].strip()),
+                                 ("0", cell))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -433,7 +455,7 @@ class DampingGlobalLcidText(unittest.TestCase):
 _BOOL_LEVERS = (
     ("--damping-curve-window", "damping_curve_window", True),
     ("--stop-added-mass", "stop_added_mass", False),
-    ("--dt2ms-tssfac-product", "dt2ms_tssfac_product", False),
+    ("--dt2ms-tssfac-product", "dt2ms_tssfac_product", True),
     ("--tet-isolid1", "tet_isolid1", True),
     ("--law1-shell-global-n", "law1_shell_global_n", True),
     ("--s2s-type25", "s2s_type25", False),
@@ -443,6 +465,9 @@ _BOOL_LEVERS = (
     ("--soft2-iedge-gate", "soft2_iedge_gate", True),
     ("--srnde-ishape", "srnde_ishape", True),
     ("--maxint-stress-all", "maxint_stress_all", True),
+    # round 10, part B (decision 8: every default gets an opt-out)
+    ("--surfatyp-all-parts", "surfatyp_all_parts", True),
+    ("--tiebreak-companion-stfac", "tiebreak_companion_stfac", True),
 )
 #: the non-boolean levers and their defaults
 _VALUE_LEVERS = {"print_every": None, "inter_stmin": {}, "inter_inacti": {}}
@@ -800,23 +825,26 @@ class HelpTexts(unittest.TestCase):
 class ByteIdentityAtMaster(unittest.TestCase):
 
     def test_plain_deck_keeps_the_master_bytes(self):
-        _r, starter, engine = _convert(_deck())
+        _r, starter, engine = _convert(_deck(), shrf_ashear=False)
         self.assertEqual(_sha(starter), _PIN_STARTER)
+        self.assertEqual(_sha(engine), _PIN_ENGINE)
+        # the default: those bytes plus A1's one Ashear cell (round 10)
+        _r, starter, engine = _convert(_deck())
+        self.assertEqual(_sha(starter), _PIN_STARTER_R10)
         self.assertEqual(_sha(engine), _PIN_ENGINE)
 
     def test_the_read_only_cards_change_no_byte(self):
         """ENDCYC / DTMIN / ENDENG / ENDMAS, IKEDIT beside a
-        *DATABASE_GLSTAT, SHRF and a *CONTROL_UNITS that maps to the
-        default triple are read and stored - the files stay those of the
-        plain deck."""
+        *DATABASE_GLSTAT and a *CONTROL_UNITS that maps to the default
+        triple are read and stored - the files stay those of the plain
+        deck. (SHRF left this list in round 10: A1 writes it.)"""
         cards = _deck(
             control="*CONTROL_TERMINATION\n"
                     + _row(0.001, 900000, 0.001, 50.0, 4.0) + "\n",
-            shrf="0.8333",
             extra="*CONTROL_OUTPUT\n" + _row(0, 0, 0, 0, 0.0, 0, 2000) + "\n"
                   + _units_card("mm", "sec", "mtrc_ton", "K"))
         _r, s1, e1 = _convert(cards)
-        self.assertEqual(_sha(s1), _PIN_STARTER)
+        self.assertEqual(_sha(s1), _PIN_STARTER_R10)
         self.assertEqual(_sha(e1), _PIN_ENGINE)
 
 
@@ -1167,6 +1195,8 @@ _GUI_LEVER_VARS = {
     "soft2_iedge_gate": "soft2_iedge_gate",
     "srnde_ishape": "srnde_ishape",
     "maxint_stress_all": "maxint_stress_all",
+    "surfatyp_all_parts": "surfatyp_all_parts",
+    "tiebreak_companion_stfac": "tiebreak_companion_stfac",
 }
 
 
@@ -1317,6 +1347,8 @@ _GUI_CHECKBOX_LABELS = {
     "soft2_iedge_gate": "SOFT 2 Iedge 22 only with DEPTH",
     "srnde_ishape": "Card E SRNDE 1 -> TYPE25 Ishape 2",
     "maxint_stress_all": "MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL",
+    "surfatyp_all_parts": "Single-surface SURFATYP 5 / 6 with an SSID",
+    "tiebreak_companion_stfac": "Tiebreak post-rupture companion TYPE25",
 }
 
 
@@ -1381,21 +1413,22 @@ def _stfac_cell(starter: str, header_prefix: str, title_prefix: str = ""):
 
 
 class SoftenStfacReach(unittest.TestCase):
-    """--soften-stfac reaches the routes its help names, and the help names
-    the TYPE25 it does not reach (the review's major 5, measured: the
-    *_TIEBREAK post-rupture companion keeps Stfac 0)."""
+    """--soften-stfac reaches the routes its help names, the *_TIEBREAK
+    post-rupture companion included since round 10 (B3; measured: STIFFNESS
+    FACTOR 1.000 -> 0.300 on a two-block coupon);
+    --no-tiebreak-companion-stfac keeps the companion at Stfac 0."""
 
     def test_the_help_and_the_gui_name_the_tiebreak_companion(self):
         h = _action_help("--soften-stfac")
         for needle in ("post-rupture companion /INTER/TYPE25",
-                       "*CONTACT_..._TIEBREAK", "keeps Stfac 0",
-                       "--tie-stfac"):
+                       "*CONTACT_..._TIEBREAK", "--no-tiebreak-companion-stfac",
+                       "keeps it at Stfac 0", "--tie-stfac"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, h)
-        self.assertIn("not a tiebreak's post-rupture companion",
+        self.assertIn("a tiebreak's post-rupture companion too",
                       _gui_source_joined())
 
-    def test_the_named_routes_and_the_named_exception_are_real(self):
+    def test_the_named_routes_and_the_companion_are_real(self):
         import test_tiebreak_rupture as _tb
         _r, s, _e = _convert(_deck(), soften_stfac=0.3)
         self.assertEqual(_stfac_cell(s, "/INTER/TYPE7/"), 0.3)
@@ -1408,14 +1441,126 @@ class SoftenStfacReach(unittest.TestCase):
                + _tb._auto_tiebreak(6, "50.0", "20.0", "0.005") + _tb._TAIL)
         _r, s, _e = _convert(tie, soften_stfac=0.3)
         self.assertEqual(
+            _stfac_cell(s, "/INTER/TYPE25/", "post_rupture_contact_"), 0.3)
+        _r, s, _e = _convert(tie, soften_stfac=0.3,
+                             tiebreak_companion_stfac=False)
+        self.assertEqual(
             _stfac_cell(s, "/INTER/TYPE25/", "post_rupture_contact_"), 0.0)
+
+
+#: the Card 3 line of test_tiebreak_rupture._auto_tiebreak (SFS 1.0, SFM 1.0)
+_TB_CARD3 = ("       1.0       1.0       0.0       0.0       0.0       0.0"
+             "       0.0       0.0\n")
+
+
+def _tb_deck(card3: str = _TB_CARD3) -> str:
+    """The two-block AUTOMATIC tiebreak deck (OPTION 6, companion
+    /INTER/TYPE25/90005) with its Card 3 line replaced by *card3*."""
+    import test_tiebreak_rupture as _tb
+    card = _tb._auto_tiebreak(6, "50.0", "20.0", "0.005")
+    assert card.count(_TB_CARD3) == 1
+    return "*KEYWORD\n" + _tb._MESH + card.replace(_TB_CARD3, card3) + _tb._TAIL
+
+
+def _tb_card3(sfs="", sfm="") -> str:
+    return f"{sfs:>10}{sfm:>10}" + "       0.0" * 6 + "\n"
+
+
+class TiebreakCompanionStfac(unittest.TestCase):
+    """Round 10, B3 (default ON, --no-tiebreak-companion-stfac): the
+    post-rupture companion /INTER/TYPE25 of a *CONTACT_..._TIEBREAK takes
+    --soften-stfac when given, else the card's Card-3 min(SFS, SFM) (blank /
+    0 = 1.0), written 0 at 1.0 - the starter's own 1.0
+    (hm_read_inter_type25.F:620-622), so a default card keeps its bytes.
+    LS-DYNA's tiebreak behaves as a surface-to-surface contact after failure
+    (Vol I R17 p.11-39) whose penalty SFSA / SFSB scale (p.11-33)."""
+
+    @staticmethod
+    def _cell(s: str) -> float:
+        return _stfac_cell(s, "/INTER/TYPE25/", "post_rupture_contact_")
+
+    @staticmethod
+    def _note(res):
+        return [w for w in res.warnings if "COMPANION /INTER/TYPE25" in w
+                and "on the companion" in w]
+
+    def test_the_card_min_sfs_sfm_reaches_the_companion(self):
+        """Hand: min(0.5, 0.8) = 0.5."""
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.5, 0.8)))
+        self.assertEqual(self._cell(s), 0.5)
+        self.assertTrue(_has(res.warnings, "Stfac=0.5 on the companion",
+                             "min(0.5, 0.8)", "i25sti3.F:140",
+                             "inintr1.F:94-99", "i25stslav.F:56-64",
+                             "0.000914 -> 0.002344 mm",
+                             "--no-tiebreak-companion-stfac"), res.warnings)
+
+    def test_a_blank_sfm_reads_one(self):
+        """Hand: min(0.5, 1.0) = 0.5."""
+        _r, s, _e = _convert(_tb_deck(_tb_card3(0.5, "")))
+        self.assertEqual(self._cell(s), 0.5)
+
+    def test_the_smaller_sfm_wins_too(self):
+        """Hand: min(0.8, 0.5) = 0.5 - every other case has SFS <= SFM, so
+        an 'SFM ignored' mutation (v = SFS) survived the whole suite (the
+        round-10 code validator's b3_sfm)."""
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.8, 0.5)))
+        self.assertEqual(self._cell(s), 0.5)
+        self.assertTrue(_has(res.warnings, "Stfac=0.5 on the companion",
+                             "min(0.8, 0.5)"), res.warnings)
+
+    def test_the_card_can_stiffen_it(self):
+        """Hand: min(2, 3) = 2."""
+        _r, s, _e = _convert(_tb_deck(_tb_card3(2.0, 3.0)))
+        self.assertEqual(self._cell(s), 2.0)
+
+    def test_one_is_written_zero_and_says_nothing(self):
+        """Hand: min(1, 1) = 1 -> written 0 (the starter's 1.0); a blank
+        Card 3 line too."""
+        for card3 in (_TB_CARD3, _tb_card3("", "")):
+            with self.subTest(card3=card3):
+                res, s, _e = _convert(_tb_deck(card3))
+                self.assertEqual(self._cell(s), 0.0)
+                self.assertEqual(self._note(res), [])
+
+    def test_soften_stfac_wins_over_the_card(self):
+        """D-B3b: --soften-stfac 0.3 over SFS 0.5 -> 0.3."""
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.5, 0.8)), soften_stfac=0.3)
+        self.assertEqual(self._cell(s), 0.3)
+        self.assertTrue(_has(res.warnings, "Stfac=0.3 on the companion",
+                             "from --soften-stfac 0.3"), res.warnings)
+
+    def test_the_opt_out_writes_zero(self):
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.5, 0.8)),
+                              tiebreak_companion_stfac=False)
+        self.assertEqual(self._cell(s), 0.0)
+        self.assertEqual(self._note(res), [])
+
+    def test_an_only_card_still_gets_no_companion(self):
+        import test_tiebreak_rupture as _tb
+        deck = ("*KEYWORD\n" + _tb._MESH
+                + "*CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY\n"
+                  "         1         2         3         3         0         0"
+                  "         0         0\n"
+                  "       0.0       0.0       0.0       0.0       0.0         0"
+                  "       0.0       0.0\n"
+                + _tb_card3(0.5, 0.8)
+                + "     100.0     200.0         0         0\n" + _tb._TAIL)
+        _r, s, _e = _convert(deck)
+        self.assertFalse([ln for ln in s.splitlines()
+                          if ln.startswith("/INTER/TYPE25/")])
+        self.assertNotIn("post_rupture_contact_", s)
+
+    def test_the_record_reads_card_3(self):
+        state = _dispatch(_tb_deck(_tb_card3(0.5, 0.8)))
+        self.assertEqual(state.contacts_tiebreak[0].sfs, 0.5)
+        self.assertEqual(state.contacts_tiebreak[0].sfm, 0.8)
 
 
 class FixRoundHelpTexts(unittest.TestCase):
     """Two sentences the review found untrue (its minors)."""
 
     def test_tet_isolid1_names_the_starters_own_tet_reset(self):
-        """sgrtails.F:984-1000 resets every 4- / 10-node tet group to
+        """sgrtails.F:984-999 resets every 4- / 10-node tet group to
         Isolid 1 for every material; WARNING 791 (:695-704) is the LAW1
         integration-point message Isolid 14 draws on the way."""
         texts = {"help": _action_help("--tet-isolid1"),
@@ -1423,7 +1568,7 @@ class FixRoundHelpTexts(unittest.TestCase):
                      __import__("k2rad").convert.__doc__)}
         for where, text in texts.items():
             with self.subTest(where=where):
-                self.assertIn("sgrtails.F:984-1000", text)
+                self.assertIn("sgrtails.F:984-999", text)
                 self.assertIn("WARNING 791", text)
                 self.assertNotIn("resets Isolid 14 on a LAW1 tet", text)
         self.assertNotIn("no WARNING 791 reset", _gui_source_joined())
@@ -1632,8 +1777,9 @@ _K01_TYPE25_21 = (
 class AssRouteIsNamed(unittest.TestCase):
     """K-01: which *CONTACT_AUTOMATIC_SINGLE_SURFACE route was taken. SSID =
     0 -> the all-parts /INTER/TYPE25 (explicit); SSID != 0 -> the
-    /INTER/TYPE7 self-contact on explicit decks too; SURFATYP 5 with SSID !=
-    0 is dropped and named. No byte moves."""
+    /INTER/TYPE7 self-contact on explicit decks too. The K-01 texts move no
+    byte. SURFATYP 5 with SSID != 0 takes the SSID = 0 route since round 10
+    (B2; dropped and named under --no-surfatyp-all-parts)."""
 
     def test_a_part_set_ssid_is_a_type7_self_contact_on_an_explicit_deck(self):
         res, s, _e = _convert(_k1a_deck(_k1a_ass(7, 1, 2)))
@@ -1667,13 +1813,24 @@ class AssRouteIsNamed(unittest.TestCase):
                     res.warnings, f"*{kw[:-3]} 21: SSID = 0",
                     "all-parts self-contact"))
 
-    def test_surfatyp_5_with_a_nonzero_ssid_is_dropped_and_named(self):
+    def test_surfatyp_5_with_a_nonzero_ssid_takes_the_ssid_0_route(self):
+        """Round 10, B2: the default routes the card (SURFATYP 5 = 'include
+        all non-spot-weld parts (the SURFA field is ignored)', Vol I R17
+        p.11-25); --no-surfatyp-all-parts drops it by name as before."""
         res, s, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5)))
+        self.assertIn("/INTER/TYPE25/22", s)
+        self.assertTrue(_has(
+            res.warnings,
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE 22: SURFATYP 5 with SSID = 7",
+            "Vol I R17 p.11-25", "SSID = 7 is ignored", "0.3489 mm",
+            "--no-surfatyp-all-parts"), res.warnings)
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5)),
+                              surfatyp_all_parts=False)
         self.assertNotIn("/INTER/", s)
         self.assertTrue(_has(
             res.warnings, "*CONTACT_AUTOMATIC_SINGLE_SURFACE 22",
             "SURFATYP 5", "Vol I R17 p.11-25", "SSID = 7",
-            "REMEDY: set SSID to 0"))
+            "REMEDY: set SSID to 0", "--no-surfatyp-all-parts"))
         self.assertFalse(_has(res.warnings, "22", "it names no part, part set"))
 
     def test_the_route_texts_change_no_byte(self):
@@ -1710,17 +1867,149 @@ class AssRouteIsNamed(unittest.TestCase):
             "(a part set, SURFATYP 2)", "/INTER/TYPE7/7 self-contact",
             "on this implicit deck", "18 non-rigid nodes"))
 
-    def test_the_surfatyp_5_drop_draws_no_id(self):
+    def test_the_surfatyp_5_drop_under_the_opt_out_draws_no_id(self):
         """The drop comes before the side resolvers, so the next contact's
-        groups keep the ids they get without the dropped card."""
-        _r, alone, _e = _convert(_k1a_deck(_k1a_s2s(12)))
-        _r, both, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5) + _k1a_s2s(12)))
+        groups keep the ids they get without the dropped card (round 10, B2:
+        the card drops under --no-surfatyp-all-parts; the default routes
+        it)."""
+        _r, alone, _e = _convert(_k1a_deck(_k1a_s2s(12)),
+                                 surfatyp_all_parts=False)
+        _r, both, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5) + _k1a_s2s(12)),
+                                surfatyp_all_parts=False)
         self.assertEqual(_type7(both, 12), _type7(alone, 12))
 
     def test_ssid_0_on_an_implicit_deck_has_no_type25_text(self):
         res, s, _e = _convert(_k1a_deck(_k1a_ass(21, 0, 0), implicit=True))
         self.assertIn("/INTER/TYPE7/21", s)
         self.assertFalse(_has(res.warnings, "all-parts self-contact (one "))
+
+
+class SurfatypAllParts(unittest.TestCase):
+    """Round 10, B2 (default ON, --no-surfatyp-all-parts): a single-surface
+    *CONTACT with a stated SSID and SURFATYP 5 ('include all non-spot-weld
+    parts (the SURFA field is ignored)', Vol I R17 p.11-25) takes the SSID =
+    0 route on both routes; SURFATYP 6 (every part except the exempted
+    *SET_PART) the explicit all-parts /INTER/TYPE25 over the other parts; an
+    implicit 6, a missing or all-exempting set and SURFATYP 7 are dropped by
+    name. ONE predicate, writer/common.single_surface_scope, decides the
+    route at every site of the single-surface record (the eroding
+    *CONTACT_ERODING_SINGLE_SURFACE is another record type with its own
+    SSID = 0 / SURFATYP 5 expansion: test_r14_round10_verify.
+    ErodingRouteScope). The deck: part 1 = the block (solid), 101 / 102 =
+    the cards; part set 1 = {101, 102}, part set 2 = {1}."""
+
+    def test_surfatyp_5_writes_the_ssid_0_bytes(self):
+        for implicit in (False, True):
+            with self.subTest(implicit=implicit):
+                _r0, s0, e0 = _convert(_k1a_deck(_k1a_ass(22, 0, 0),
+                                                 implicit=implicit))
+                _r5, s5, e5 = _convert(_k1a_deck(_k1a_ass(22, 7, 5),
+                                                 implicit=implicit))
+                self.assertEqual(s5, s0)
+                self.assertEqual(e5, e0)
+
+    def test_surfatyp_6_exempts_its_set_on_an_explicit_deck(self):
+        """Hand: all parts {1, 101, 102} minus set 2 = {1} -> [101, 102]."""
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 2, 6)))
+        self.assertIn("/INTER/TYPE25/23", s)
+        surf = int(_inter_rows(s, "/INTER/TYPE25/23")[0][0])
+        self.assertEqual(_ids_under(s, f"/SURF/PART/EXT/{surf}"), [101, 102])
+        self.assertTrue(_has(res.warnings, "SURFATYP 6 with SSID = 2",
+                             "part(s) 1 left out",
+                             "over the 2 other part(s)"), res.warnings)
+
+    def test_surfatyp_6_on_an_implicit_deck_is_dropped_by_name(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 2, 6), implicit=True))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "routes SURFATYP 6 on an EXPLICIT "
+                             "deck only", "no probe",
+                             "REMEDY: invert *SET_PART 2"), res.warnings)
+
+    def test_surfatyp_6_with_a_missing_set_is_dropped_by_name(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 99, 6)))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "no *SET_PART 99 exists in this "
+                             "deck", "REMEDY: add the *SET_PART 99"),
+                        res.warnings)
+
+    def test_surfatyp_6_exempting_every_part_is_dropped(self):
+        every = "*SET_PART_LIST\n" + _row(3) + "\n" + _row(1, 101, 102) + "\n"
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 3, 6), extra=every))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "exempts every part of the deck"),
+                        res.warnings)
+
+    def test_surfatyp_7_is_dropped_by_name(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(24, 7, 7)))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "*SET_PART_TREE branch id",
+                             "no *SET_PART_TREE reader"), res.warnings)
+
+    def test_the_opt_out_drops_5_and_6_as_before(self):
+        for sstyp, ssid in ((5, 7), (6, 2)):
+            with self.subTest(sstyp=sstyp):
+                res, s, _e = _convert(_k1a_deck(_k1a_ass(23, ssid, sstyp)),
+                                      surfatyp_all_parts=False)
+                self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "SURFATYP 6", "under "
+                             "--no-surfatyp-all-parts",
+                             ", or drop --no-surfatyp-all-parts."),
+                        res.warnings)
+
+    def test_a_two_surface_surfatyp_6_side_names_its_type(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_s2s(12, ssid=1, msid=2,
+                                                 sstyp=6)))
+        self.assertNotIn("/INTER/TYPE7/12", s)
+        self.assertTrue(_has(res.warnings, "SURFATYP 6 means 'Part set ID for "
+                             "exempted parts", "convertcontacts.cxx:268-291"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, "it names no part, part set or "
+                              "node set"), res.warnings)
+
+    def test_the_predicate_is_the_one_every_site_reads(self):
+        from k2rad.writer import common
+        self.assertIn("single_surface_scope", common.__all__)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for rel in ("k2rad/writer/contacts.py", "k2rad/writer/joint_screw.py",
+                    "k2rad/gapmin.py"):
+            with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                src = fh.read()
+            for spelling in ("c.ssid == 0 and live(c)",
+                             'kinds[c.inter_id] = ("/INTER/TYPE25" if '
+                             "c.ssid == 0",
+                             "if c.ssid == 0 and not state.is_implicit:"):
+                with self.subTest(file=rel, spelling=spelling):
+                    self.assertNotIn(spelling, src)
+        # the lever-reach consumer (_written_interface_types) follows it
+        res, _s, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5)),
+                               inter_stmin={22: 0.0})
+        self.assertTrue(_has(res.warnings, "--inter-stmin 22=0: interface 22 "
+                             "was emitted as /INTER/TYPE25, not as an "
+                             "/INTER/TYPE7"), res.warnings)
+
+    def test_the_joint_screw_split_follows_the_route(self):
+        """tests/fixtures/screw_synthetic.py's contact is SSID 0 SURFATYP 5:
+        the same card with SSID 77 writes the fixture's bytes, the split
+        included; SSID 78 SURFATYP 6 exempting the nut (part 10000045)
+        holds no screw pair, so it writes ONE /INTER/TYPE25 and no split."""
+        sc = _t7._screw_synthetic()
+        base = sc.build_deck()
+        row0 = sc._row(0, 0, 5, 0)
+        self.assertEqual(base.count(row0), 1)
+        res0, s0, e0 = _convert(base)
+        self.assertTrue(_has(res0.warnings, "is split out"), res0.warnings)
+        self.assertEqual(s0.count("/INTER/TYPE25/"), 2)
+        res, s, e = _convert(base.replace(row0, sc._row(77, 0, 5, 0)))
+        self.assertEqual(s, s0)
+        self.assertEqual(e, e0)
+        self.assertTrue(_has(res.warnings, "is split out"), res.warnings)
+        nut = "*SET_PART_LIST\n" + sc._row(78) + "\n" + sc._row(sc.PART_B)
+        res, s, _e = _convert(sc.build_deck(extra=nut).replace(
+            row0, sc._row(78, 0, 6, 0)))
+        self.assertEqual(s.count("/INTER/TYPE25/"), 1)
+        self.assertFalse(_has(res.warnings, "is split out"), res.warnings)
+        self.assertFalse(_has(res.warnings, "*CONSTRAINED_JOINT_SCREW",
+                              "refused"), res.warnings)
 
 
 # ── K-02 ─────────────────────────────────────────────────────────────────────
@@ -1842,6 +2131,9 @@ class StminOverrideAndFloor(unittest.TestCase):
                        "K = min(Km, Ks) = 256.9", "below Stfac 3.89"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, ws[0])
+        # round 10, B4: a hex part of an isotropic law keeps its text
+        self.assertNotIn("1.5 V", ws[0])
+        self.assertNotIn("B = ", ws[0])
         self.assertEqual(_type7(s, 12)["stmin"], "1000")
         res, _s, _e = _convert(_k1a_deck(_k1a_s2s(12)))      # E 2400: silent
         self.assertEqual(_stmin_warnings(res), [])
@@ -1861,6 +2153,9 @@ class StminOverrideAndFloor(unittest.TestCase):
                        "no Stfac lifts K above the floor"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, ws[0])
+        # round 10, B4: a hex part of an isotropic law keeps its text
+        self.assertNotIn("VOLU/32", ws[0])
+        self.assertNotIn("B = ", ws[0])
 
     def test_the_general_type7_takes_the_override(self):
         deck = _k1a_deck(_k1a_ass(
@@ -1904,6 +2199,282 @@ class StminOverrideAndFloor(unittest.TestCase):
         res, _s, _e = _convert(_k1a_deck(_k1a_ass(21, 0, 0), implicit=True,
                                          card_e=10.0, block_e=10.0))
         self.assertEqual(len(_stmin_warnings(res)), 1)
+
+
+def _b4_row(*v, w=10) -> str:
+    return "".join((f"{x}" if not isinstance(x, float) else f"{x:.6g}")
+                   .rjust(w) for x in v)
+
+
+def _b4_node(i, p) -> str:
+    return f"{i:>8}{p[0]:>16.6f}{p[1]:>16.6f}{p[2]:>16.6f}"
+
+
+def _b4_tail(ssid: int, msid: int) -> str:
+    """The card's material, the base SPC, the thrown card and the S2S card
+    (SSID / MSID parts) of the round-10 B4 coupons (census g3j P5 / P6)."""
+    return ("*MAT_ELASTIC\n" + _b4_row(2, 1.35e-9, 3200.0, 0.35) + "\n"
+            + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n" + _b4_row(16)
+            + "b4_probe\n" + _b4_row(ssid, msid, 3, 3) + "\n"
+            + _b4_row(0.0, 0.0) + "\n" + _b4_row(0.0, 0.0) + "\n*END\n")
+
+
+def _b4_hex_deck(block_mat: str) -> str:
+    """g3j P5's geometry: a 10 x 10 x 4 block of 2 mm hex cubes (part 1,
+    MID 1 = *block_mat*) as the MAIN side under a 0.35 card of 4 x 4
+    shells of 2.5 mm (part 101, E 3200: Ks = E x t = 1120). A boundary face:
+    A = 4, V = 8, A^2/V = 2."""
+    pts, nid, ids = [], 2000, {}
+    for k in range(3):
+        for j in range(6):
+            for i in range(6):
+                nid += 1
+                ids[(i, j, k)] = nid
+                pts.append(_b4_node(nid, (2.0 * i, 2.0 * j, 2.0 * k)))
+    hexes, e = [], 2000
+    for k in range(2):
+        for j in range(5):
+            for i in range(5):
+                e += 1
+                c = [ids[(a, b, kk)] for kk in (k, k + 1) for a, b in (
+                    (i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))]
+                hexes.append("".join(f"{v:>8}" for v in [e, 1] + c))
+    card, cid = [], {}
+    n = 0
+    for j in range(5):
+        for i in range(5):
+            n += 1
+            cid[(i, j)] = n
+            card.append(_b4_node(n, (2.5 * i, 2.5 * j, 4.2)))
+    shells, e = [], 0
+    for j in range(4):
+        for i in range(4):
+            e += 1
+            shells.append("".join(f"{v:>8}" for v in [e, 101, cid[(i, j)],
+                          cid[(i + 1, j)], cid[(i + 1, j + 1)],
+                          cid[(i, j + 1)]]))
+    return ("*KEYWORD\n*TITLE\nround 10 B4 hex probe\n*CONTROL_TERMINATION\n"
+            + _b4_row(3.0e-4) + "\n*NODE\n" + "\n".join(card + pts) + "\n"
+            + "*ELEMENT_SOLID\n" + "\n".join(hexes) + "\n"
+            + "*ELEMENT_SHELL\n" + "\n".join(shells) + "\n"
+            + "*PART\nblock\n" + _b4_row(1, 1, 1) + "\n*PART\ncard\n"
+            + _b4_row(101, 2, 2) + "\n*SECTION_SOLID\n" + _b4_row(1, 1) + "\n"
+            + "*SECTION_SHELL\n" + _b4_row(2, 2, 0.8333, 2) + "\n"
+            + _b4_row(0.35, 0.35, 0.35, 0.35) + "\n" + block_mat
+            + "*DEFINE_CURVE\n" + _b4_row(9) + "\n"
+            + "".join(f"{x:>20}{y:>20}\n" for x, y in (
+                (0.0, 0.0), (0.05, 5.0), (0.5, 50.0), (0.9, 500.0)))
+            + _b4_tail(101, 1))
+
+
+def _b4_tet_deck(tet10: bool, block_secondary: bool) -> str:
+    """g3j P6 / P6b / P6c's geometry: a 4 x 4 x 2 *MAT_ELASTIC block (E 100,
+    nu 0.3: B 83.33) of 2 mm cubes, each cut into 6 Kuhn tets (a boundary
+    face: a right triangle of legs 2, A = 2; V = 8/6), with the six midside
+    nodes in Radioss order (a,b) (b,c) (c,a) (a,d) (b,d) (c,d) for a
+    /TETRA10 (ELFORM 16) or the collapsed 8-node card for a /TETRA4
+    (ELFORM 10). As the MAIN side under a 4 x 4 card of 1 mm shells (P6 /
+    P6b), or as the SECONDARY side under a 6 x 6 card spanning -1 .. 5
+    (P6c)."""
+    h, pts, ids = 2.0, {}, [1000]
+
+    def pid_of(p):
+        key = tuple(round(c, 9) for c in p)
+        if key not in pts:
+            ids[0] += 1
+            pts[key] = ids[0]
+        return pts[key]
+
+    def vol(a, b, c, d):
+        u = [b[k] - a[k] for k in range(3)]
+        v = [c[k] - a[k] for k in range(3)]
+        w = [d[k] - a[k] for k in range(3)]
+        return (u[0] * (v[1] * w[2] - v[2] * w[1])
+                - u[1] * (v[0] * w[2] - v[2] * w[0])
+                + u[2] * (v[0] * w[1] - v[1] * w[0])) / 6.0
+
+    tets = []
+    for j in range(2):
+        for i in range(2):
+            o = (i * h, j * h, 0.0)
+            for pa in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1),
+                       (2, 1, 0)):
+                cur = [0, 0, 0]
+                corners = [tuple(o)]
+                for ax in pa:
+                    cur[ax] = 1
+                    corners.append((o[0] + cur[0] * h, o[1] + cur[1] * h,
+                                    o[2] + cur[2] * h))
+                a, b, c, d = corners
+                if vol(a, b, c, d) < 0:
+                    b, c = c, b
+                mids = [tuple((p[m] + q[m]) / 2.0 for m in range(3))
+                        for p, q in ((a, b), (b, c), (c, a), (a, d), (b, d),
+                                     (c, d))]
+                tets.append([pid_of(p) for p in (a, b, c, d)]
+                            + [pid_of(p) for p in mids])
+    n_side, x0 = (7, -1.0) if block_secondary else (5, 0.0)
+    card, cid, n = [], {}, 0
+    for j in range(n_side):
+        for i in range(n_side):
+            n += 1
+            cid[(i, j)] = n
+            card.append(_b4_node(n, (x0 + i, x0 + j, 2.2)))
+    shells, e = [], 0
+    for j in range(n_side - 1):
+        for i in range(n_side - 1):
+            e += 1
+            shells.append("".join(f"{v:>8}" for v in [e, 101, cid[(i, j)],
+                          cid[(i + 1, j)], cid[(i + 1, j + 1)],
+                          cid[(i, j + 1)]]))
+    used = set()
+    for t in tets:
+        used.update(t if tet10 else t[:4])
+    blk = [_b4_node(nn, p) for p, nn in sorted(pts.items(), key=lambda x: x[1])
+           if nn in used]
+    sol = []
+    for t_i, t in enumerate(tets, 2001):
+        if tet10:
+            sol.append(f"{t_i:>8}{1:>8}\n" + "".join(f"{v:>8}" for v in t))
+        else:
+            c4 = t[:4]
+            sol.append("".join(f"{v:>8}" for v in [t_i, 1] + c4 + [c4[3]] * 4))
+    return ("*KEYWORD\n*TITLE\nround 10 B4 tet probe\n*CONTROL_TERMINATION\n"
+            + _b4_row(3.0e-4) + "\n*NODE\n" + "\n".join(card + blk) + "\n"
+            + "*ELEMENT_SOLID\n" + "\n".join(sol) + "\n"
+            + "*ELEMENT_SHELL\n" + "\n".join(shells) + "\n"
+            + "*PART\nblock\n" + _b4_row(1, 1, 1) + "\n*PART\ncard\n"
+            + _b4_row(101, 2, 2) + "\n*SECTION_SOLID\n"
+            + _b4_row(1, 16 if tet10 else 10) + "\n*SECTION_SHELL\n"
+            + _b4_row(2, 2, 0.8333, 2) + "\n"
+            + _b4_row(0.35, 0.35, 0.35, 0.35) + "\n*MAT_ELASTIC\n"
+            + _b4_row(1, 1.2e-9, 100.0, 0.3) + "\n"
+            + (_b4_tail(1, 101) if block_secondary else _b4_tail(101, 1)))
+
+
+_B4_LAW38 = ("*MAT_LOW_DENSITY_FOAM\n" + _b4_row(1, "5e-11", 100, 9, "1e+20", 1,
+                                                  0, 0) + "\n"
+             + _b4_row(0, 0, 0) + "\n")
+
+
+class StminEstimateLawsAndTets(unittest.TestCase):
+    """Round 10, B4 (warning text only, no byte): the K-02 estimate reads
+    the starter's own B, tet volume and TET10 node volume. B = the emitted
+    law's PM(32) (hm_read_mat.F90:1451-1464): E for /MAT/LAW38
+    (hm_read_mat38.F:347-348), the largest written modulus for /MAT/LAW50
+    (hm_read_mat50.F90:405/416), the largest written uncompressed modulus
+    for /MAT/LAW28 (hm_read_mat28.F:185); LAW90 keeps E / 3 (its C1 with the
+    Nu 0 k2rad writes). A tet main face is over the starter's 1.5 V (a tet
+    is stored as a degenerate brick, hm_read_solid.F:278-284 / :386-392,
+    whose one-point volume is 1.5 V, i7sti3.F:426-444); a /TETRA10
+    secondary node takes VOLU/32 (corner) or 7 VOLU/48 (midside) of VOLU =
+    V/4 (s10init3.F:233 / :347, sbulk3.F:152-181). Each expectation is hand
+    computed from the geometry; the measured one-cell Stmin brackets (g3j,
+    nt 4) hold them: LAW38 [180, 220), TET10 main [10.3, 10.5), TET4 main
+    [160, 173), the softest TET10 secondary node [28.5, 29.5)."""
+
+    def _line(self, deck: str) -> str:
+        res, _s, _e = _convert(deck)
+        ws = _stmin_warnings(res)
+        self.assertEqual(len(ws), 1, res.warnings)
+        return ws[0]
+
+    def test_law38_takes_b_equal_to_e(self):
+        """Hand: B = E = 100 (no nu on the record), A^2/V = 2 -> 200 (the
+        old E / 3 x 2 = 66.67)."""
+        w = self._line(_b4_hex_deck(_B4_LAW38))
+        self.assertIn("Km = Stfac x B x A^2/V = 1 x 100 x 2 = 200", w)
+        self.assertIn("B = E for /MAT/LAW38 (hm_read_mat38.F:347-348)", w)
+        self.assertIn("below Stfac 5", w)
+
+    def test_law50_crushable_foam_takes_the_largest_modulus(self):
+        """Hand: max(100, 100 / 2.6 = 38.46) = 100 -> 200 (the old
+        100 / (3 x 0.4) = 83.33 would print 166.7)."""
+        mat = ("*MAT_CRUSHABLE_FOAM\n"
+               + _b4_row(1, "5e-11", 100, 0.3, 9, 0, 0) + "\n")
+        w = self._line(_b4_hex_deck(mat))
+        self.assertIn("1 x 100 x 2 = 200", w)
+        self.assertIn("B = the largest /MAT/LAW50 modulus", w)
+
+    def test_law28_honeycomb_takes_the_largest_uncompressed_modulus(self):
+        """Hand: max(EAAU .. GCAU) = 400 -> 800 (the old 70000 / 1.2 x 2 =
+        1.167e5 would not fire at all)."""
+        mat = ("*MAT_HONEYCOMB\n"
+               + _b4_row(1, "5e-11", 70000, 0.3, 50, 0.2, 0.05, 0) + "\n"
+               + _b4_row(9, 9, 9, 9, 9, 9, 9, 0) + "\n"
+               + _b4_row(50, 60, 400, 20, 30, 25, 0, 1) + "\n"
+               + _b4_row(0, 0, 0, 0, 0, 0) + "\n" + _b4_row(0, 0, 0, 0, 0)
+               + "\n")
+        w = self._line(_b4_hex_deck(mat))
+        self.assertIn("1 x 400 x 2 = 800", w)
+        self.assertIn("B = the largest uncompressed /MAT/LAW28 modulus", w)
+
+    def test_law90_keeps_e_over_three(self):
+        """Hand: E / 3 = 100 (the starter's C1 with the Nu 0 k2rad writes)
+        -> 200, with no law note."""
+        mat = ("*MAT_LOW_DENSITY_VISCOUS_FOAM\n"
+               + _b4_row(1, "5e-11", 300, 9, 0, 1, 0, 0) + "\n"
+               + _b4_row(0, 0, 0, 0, 0, 0, 0, 0) + "\n")
+        w = self._line(_b4_hex_deck(mat))
+        self.assertIn("1 x 100 x 2 = 200", w)
+        self.assertNotIn("B = ", w)
+
+    def test_a_tet10_main_face_is_four_triangles_over_1_5_v(self):
+        """Hand: ((2/4)^2) / (1.5 x 8/6) = 0.125; x 83.33 = 10.42."""
+        w = self._line(_b4_tet_deck(tet10=True, block_secondary=False))
+        self.assertIn("Km = Stfac x B x A^2/(1.5 V) = 1 x 83.33 x 0.125 = "
+                      "10.42", w)
+        self.assertIn("hm_read_solid.F:278-284 / :386-392", w)
+        self.assertIn("i7sti3.F:426-444", w)
+
+    def test_a_tet4_main_face_is_over_1_5_v(self):
+        """Hand: 2^2 / (1.5 x 8/6) = 2; x 83.33 = 166.7."""
+        w = self._line(_b4_tet_deck(tet10=False, block_secondary=False))
+        self.assertIn("Km = Stfac x B x A^2/(1.5 V) = 1 x 83.33 x 2 = 166.7",
+                      w)
+
+    def test_a_tet10_secondary_splits_v_over_4(self):
+        """Hand (the census tet10_hand.py, no k2rad import): 66 surface
+        nodes (18 corners + 48 face-edge midsides), median (2 V_node)^(1/3)
+        0.5793 -> 48.28; the softest node 28.89 sits in the measured
+        bracket [28.5, 29.5)."""
+        w = self._line(_b4_tet_deck(tet10=True, block_secondary=True))
+        self.assertIn("Ks = B x (2 V_node)^(1/3) = 83.33 x 0.5793 = 48.28 "
+                      "(the median of 66 surface nodes", w)
+        self.assertIn("VOLU/32", w)
+        self.assertIn("7 VOLU/48", w)
+
+    def test_the_tet10_corner_share_sets_the_softest_node(self):
+        """The per-node rule, not only its median (decision D-B4b: the
+        median 48.28 is a midside node's, so it does not see the corner
+        share): the softest of the 66 surface nodes is a corner node at
+        B x (2 VOLU/32 summed over its tets)^(1/3) = 28.89 (hand, the census
+        tet10_hand.py), the value the measured Stmin bracket [28.5, 29.5)
+        holds."""
+        from unittest import mock
+        from k2rad.writer import contacts
+        st = _dispatch(_b4_tet_deck(tet10=True, block_secondary=True))
+        seen = []
+        real = contacts._median
+
+        def spy(vals):
+            seen.append(list(vals))
+            return real(vals)
+        st.stmin_part_estimates.clear()
+        with mock.patch.object(contacts, "_median", spy):
+            est = contacts._part_stiffness(st, [1])[1]
+        self.assertIsNotNone(est)
+        l13 = [v for v in seen if len(v) == 66]
+        self.assertEqual(len(l13), 1, [len(v) for v in seen])
+        self.assertAlmostEqual(est.b * min(l13[0]), 28.89, places=2)
+        self.assertAlmostEqual(est.b * real(l13[0]), 48.28, places=2)
+
+    def test_a_tet4_secondary_is_unchanged(self):
+        """Hand: V/4 per corner, median over 18 surface nodes 115.6."""
+        w = self._line(_b4_tet_deck(tet10=False, block_secondary=True))
+        self.assertIn("83.33 x 1.387 = 115.6 (the median of 18 surface "
+                      "nodes", w)
+        self.assertNotIn("VOLU/32", w)
 
 
 # ── K-03 ─────────────────────────────────────────────────────────────────────
@@ -2567,15 +3138,25 @@ class SoftenStfacWarningFollowsTheRoutes(unittest.TestCase):
         self.assertIn("forced on all /INTER/TYPE7 interfaces (12)", ws[0])
         self.assertIn("/INTER/TYPE25 21", ws[0])
 
-    def test_the_tiebreak_companion_is_named_as_not_reached(self):
+    def test_the_tiebreak_companion_is_reached_and_the_opt_out_named(self):
+        """Round 10, B3: --soften-stfac reaches the companion by default;
+        under --no-tiebreak-companion-stfac the summary names it as not
+        reached."""
         import test_tiebreak_rupture as _tb
         tie = ("*KEYWORD\n" + _tb._MESH
                + _tb._auto_tiebreak(6, "50.0", "20.0", "0.005") + _tb._TAIL)
         res, _s, _e = _convert(tie, soften_stfac=0.3)
         ws = _soften_warnings(res)
         self.assertEqual(len(ws), 1, ws)
+        self.assertIn("forced on /INTER/TYPE25 90005", ws[0])
+        self.assertNotIn("reached no interface", ws[0])
+        res, _s, _e = _convert(tie, soften_stfac=0.3,
+                               tiebreak_companion_stfac=False)
+        ws = _soften_warnings(res)
+        self.assertEqual(len(ws), 1, ws)
         self.assertIn("reached no interface", ws[0])
-        self.assertIn("post-rupture companion /INTER/TYPE25", ws[0])
+        self.assertIn("post-rupture companion /INTER/TYPE25 90005", ws[0])
+        self.assertIn("under --no-tiebreak-companion-stfac", ws[0])
 
     def test_the_soft_routed_types_are_named(self):
         for soft, name in ((-11, "/INTER/TYPE11 31"), (-19, "/INTER/TYPE19 31"),
@@ -3259,6 +3840,83 @@ class StminFloorNoStiffnessLaw(unittest.TestCase):
         self.assertAlmostEqual(est.b, 10.0 / (3.0 * (1.0 - 0.76)))
 
 
+def _type25_law_lines(res, iid: int = 12):
+    return [w for w in res.warnings
+            if w.startswith(f"/INTER/TYPE25 {iid}:")
+            and "gives the starter no contact stiffness" in w]
+
+
+class Type25NoContactStiffnessLaw(unittest.TestCase):
+    """Round 10, B6 (text only): the K-02 naming of a no-contact-stiffness
+    law covered the /INTER/TYPE7 routes only; the three /INTER/TYPE25
+    emitters - the SSID = 0 / SURFATYP 5 / 6 self-contact, the eroding /
+    node-to-surface family, --s2s-type25 - now name a *MAT_ARUP_ADHESIVE
+    (/MAT/LAW169) part: its segments get STF = 0 (i25sti3.F:884-889), its
+    nodes a secondary stiffness of 0 (i25stslav.F:63-64), and the engine
+    search skips both (i25trivox.F:276/471). MEASURED (two cards thrown onto
+    a LAW169 block in an SSID = 0 TYPE25, nt 4): KE 0.04725 at every 0.2 ms,
+    a 0.00 % drop, against 50.33 % with *MAT_ELASTIC E 10."""
+
+    _lines = staticmethod(_type25_law_lines)
+
+    def _deck(self, contact, mat=_ADHESIVE_BLOCK_MAT):
+        base = _k1a_deck(contact, block_e=10.0)
+        self.assertEqual(base.count(_SOFT_BLOCK_MAT), 1)
+        return base.replace(_SOFT_BLOCK_MAT, mat)
+
+    def test_the_ssid_0_self_contact_names_the_law169_part(self):
+        res, s, _e = _convert(self._deck(_k1a_ass(12, 0, 0)))
+        self.assertIn("/INTER/TYPE25/12", s)
+        ws = self._lines(res)
+        self.assertEqual(len(ws), 1, res.warnings)
+        for needle in ("/INTER/TYPE25 12: part 1 (/MAT/LAW169, "
+                       "*MAT_ARUP_ADHESIVE)", "hm_read_mat169.F90:202",
+                       "i25sti3.F:884-889", "i25stslav.F:63-64",
+                       "i25trivox.F:276/471", "0.00 % drop", "50.33 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, ws[0])
+
+    def test_an_elastic_block_is_not_named(self):
+        res, _s, _e = _convert(self._deck(_k1a_ass(12, 0, 0),
+                                          mat=_SOFT_BLOCK_MAT))
+        self.assertEqual(self._lines(res), [])
+
+    def test_the_eroding_family_names_it(self):
+        res, s, _e = _convert(self._deck(_eroding_s2s(12, card_a=())))
+        self.assertIn("/INTER/TYPE25/12", s)
+        self.assertEqual(len(self._lines(res)), 1, res.warnings)
+
+    def test_the_s2s_type25_route_names_it_and_no_type7_line(self):
+        res, s, _e = _convert(self._deck(_k1a_s2s(12)), s2s_type25=True)
+        self.assertIn("/INTER/TYPE25/12", s)
+        self.assertEqual(len(self._lines(res)), 1, res.warnings)
+        self.assertEqual(_inert_warnings(res), [], res.warnings)
+
+    def test_a_law169_part_outside_the_contact_is_not_named(self):
+        """An eroding single surface over part set 1 (the cards): the LAW169
+        block is in no contact."""
+        res, s, _e = _convert(self._deck(_k1a_ass(
+            12, 1, 2, kw="CONTACT_ERODING_SINGLE_SURFACE_ID",
+            tail=_row(0, 1, 1) + "\n")))
+        self.assertIn("/INTER/TYPE25/12", s)
+        self.assertEqual(self._lines(res), [], res.warnings)
+
+    def test_the_line_moves_no_byte(self):
+        from unittest import mock
+        for name, deck, kw in (
+                ("ssid0", self._deck(_k1a_ass(12, 0, 0)), {}),
+                ("eroding", self._deck(_eroding_s2s(12, card_a=())), {}),
+                ("s2s", self._deck(_k1a_s2s(12)), {"s2s_type25": True})):
+            with self.subTest(name):
+                _r, s, e = _convert(deck, **kw)
+                with mock.patch(
+                        "k2rad.writer.contacts._warn_type25_no_contact_"
+                        "stiffness", lambda *a, **k: None):
+                    _r0, s0, e0 = _convert(deck, **kw)
+                self.assertEqual(s, s0)
+                self.assertEqual(e, e0)
+
+
 # ── the hand-overs: MAXINT, two help texts, the *DAMPING_GLOBAL sentence ─────
 
 class DbExtentBinaryMaxint(unittest.TestCase):
@@ -3359,9 +4017,10 @@ class HandOverHelpTexts(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, h)
         h = _action_help("--single-surface-sst-gap")
-        for needle in ("self-mirrored SOFT -11 / -19", "MST is named as "
+        # round 10, B1: the SOFT -7 route takes |SST| too
+        for needle in ("self-mirrored SOFT -7 / -11 / -19", "MST is named as "
                        "unused", "*PART_CONTACT OPTT", "MINIMUM GAP 0.35",
-                       "TYPE7, TYPE11 and TYPE19"):
+                       "TYPE7, TYPE11 and TYPE19", "0.5005 mm"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, h)
 
@@ -3926,9 +4585,10 @@ class SingleSurfaceSstGap(unittest.TestCase):
     segment of a single-surface contact is SURFA, so two shells that each
     carry the contact thickness SST meet at SST/2 + SST/2 = |SST| (Vol I R17
     p.11-33 SAST); the two-surface (|SST| + |MST|)/2 engaged them at half
-    that. Shell-only Igap-0 routes only: a mixed shell / solid set is refused
-    by name, the SOFT -7 TYPE7 (Igap 2) gets a warning, the airbag route and
-    every two-surface route are untouched."""
+    that. Shell-only: a mixed shell / solid set is refused by name, the SOFT
+    -7 TYPE7 (Igap 2) takes |SST| too (round 10, B1: its gap is max(Gapmin,
+    t)) and names an SST below t with OPTT, the airbag route and every
+    two-surface route are untouched."""
 
     def test_the_shell_ass_route_takes_sst(self):
         deck = _k1a_deck(_k1a_ass(7, 1, 2, card3=(0, 0, 0.35)))
@@ -3970,9 +4630,12 @@ class SingleSurfaceSstGap(unittest.TestCase):
         self.assertTrue(_has(res.warnings, "CONTACT 21:", "mixes shells and "
                              "solids"), res.warnings)
 
-    def test_the_soft_11_and_19_self_mirrors_take_sst(self):
+    def test_the_soft_7_11_and_19_self_mirrors_take_sst(self):
+        """Round 10, B1 extends the -11 / -19 rule to -7 (hand: |0.35| by
+        default, (0.35 + 0)/2 = 0.175 under the opt-out)."""
         gen = "CONTACT_AUTOMATIC_GENERAL_ID"
-        for soft, gap in ((-11, _gap11), (-19, _gap19)):
+        for soft, gap in ((-7, lambda s, i: _type7(s, i)["gapmin"]),
+                          (-11, _gap11), (-19, _gap19)):
             with self.subTest(soft=soft):
                 deck = _k1a_deck(_k1a_ass(31, 1, 2, card3=(0, 0, 0.35), kw=gen,
                                           tail=_row(soft) + "\n"))
@@ -3981,18 +4644,76 @@ class SingleSurfaceSstGap(unittest.TestCase):
                 _r, s, _e = _convert(deck, single_surface_sst_gap=False)
                 self.assertEqual(gap(s, 31), 0.175)
 
-    def test_soft_7_names_optt_below_the_shell_thickness(self):
+    def test_soft_7_takes_sst_and_names_optt_below_the_shell_thickness(self):
+        """Round 10, B1: SST 0.2 on t 0.35 writes Gapmin |0.2| = 0.2 (was
+        (0.2 + 0)/2 = 0.1) and still names the OPTT lever; SST 0.5 writes
+        |0.5| = 0.5 with the Igap-2 sentence and no OPTT line."""
         gen = "CONTACT_AUTOMATIC_GENERAL_ID"
         res, s, _e = _convert(_k1a_deck(_k1a_ass(
             31, 1, 2, card3=(0, 0, 0.2), kw=gen, tail=_row(-7) + "\n")))
-        self.assertEqual(_type7(s, 31)["gapmin"], 0.1)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.2)
         self.assertTrue(_has(res.warnings, "CONTACT 31:", "Igap 2",
                              "below the shell thickness t = 0.35",
                              "no effect", "*PART_CONTACT OPTT 0.2"),
                         res.warnings)
-        res, _s, _e = _convert(_k1a_deck(_k1a_ass(
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(
             31, 1, 2, card3=(0, 0, 0.5), kw=gen, tail=_row(-7) + "\n")))
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.5)
         self.assertFalse(_has(res.warnings, "*PART_CONTACT OPTT"))
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "Gapmin=0.5 = |SST|",
+                             "SOFT -7 writes Igap 2",
+                             "max(Gapmin, t_s/2 + t_m/2)", "i7cor3.F:98-121",
+                             "0.3501 mm", "0.5005 mm"), res.warnings)
+
+    def test_soft_7_on_a_mixed_set_keeps_the_old_value(self):
+        """Round 10, B1: the mixed-set refusal on the SOFT -7 route keeps
+        (0.35 + 0)/2 = 0.175 and offers no --inter-gapmin (it does not reach
+        the sentinel routes, CardStack K-05; D-B1)."""
+        deck = _k1a_deck(_k1a_ass(31, 1, 2, card3=(0, 0, 0.35),
+                                  kw="CONTACT_AUTOMATIC_GENERAL_ID",
+                                  tail=_row(-7) + "\n"))
+        old_set = "*SET_PART_LIST\n" + _row(1) + "\n" + _row(101, 102) + "\n"
+        self.assertEqual(deck.count(old_set), 1)
+        deck = deck.replace(old_set, "*SET_PART_LIST\n" + _row(1) + "\n"
+                            + _row(101, 102, 1) + "\n")
+        res, s, _e = _convert(deck)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.175)
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "mixes shells and "
+                             "solids", "refused", "(|SST| + |MST|)/2 = 0.175"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, "--inter-gapmin 31=VAL"),
+                         res.warnings)
+
+    def test_a_two_surface_soft_7_card_is_unchanged(self):
+        """Round 10, B1: a two-surface SOFT -7 card keeps (0.35 + 0.1)/2 =
+        0.225 and gets no K-12 sentence."""
+        res, s, _e = _convert(_k1a_deck(_k1a_s2s(
+            31, kw="CONTACT_AUTOMATIC_GENERAL_ID", card3=(0, 0, 0.35, 0.1),
+            tail=_row(-7) + "\n")))
+        self.assertAlmostEqual(_type7(s, 31)["gapmin"], 0.225)
+        self.assertFalse(_has(res.warnings, "CONTACT 31:", "= |SST|"),
+                         res.warnings)
+
+    def test_soft_7_opt_out_keeps_the_old_gap(self):
+        """Round 10, B1: --no-single-surface-sst-gap writes 0.5/2 = 0.25 on
+        the SOFT -7 route and prints no Igap-2 sentence."""
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(
+            31, 1, 2, card3=(0, 0, 0.5), kw="CONTACT_AUTOMATIC_GENERAL_ID",
+            tail=_row(-7) + "\n")), single_surface_sst_gap=False)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.25)
+        self.assertEqual(_type7(s, 31)["igap"], "2")
+        self.assertFalse(_has(res.warnings, "SOFT -7 writes Igap 2"),
+                         res.warnings)
+
+    def test_soft_7_names_mst_as_unused(self):
+        """Round 10, B1: SST 0.5 and MST 0.1 on the self-mirrored SOFT -7
+        card write |0.5| = 0.5 and name MST as unused."""
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(
+            31, 1, 2, card3=(0, 0, 0.5, 0.1), kw="CONTACT_AUTOMATIC_GENERAL_ID",
+            tail=_row(-7) + "\n")))
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.5)
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "MST 0.1 is not "
+                             "used"), res.warnings)
 
     def test_the_airbag_and_two_surface_routes_are_untouched(self):
         res, s, _e = _convert(_k1a_deck(_k1a_ass(
@@ -4334,15 +5055,20 @@ class SingleSurfaceSstGapReviewPins(unittest.TestCase):
         self.assertFalse(_has(res.warnings, "|SST|/2 + |SST|/2"),
                          res.warnings)
 
-    def test_soft_7_with_a_gapmin_at_the_thickness_says_nothing(self):
-        """R12c: SST below t but an MST that lifts the written Gapmin to t
-        or more - the floor acts, no OPTT warning."""
+    def test_soft_7_names_the_unused_mst_and_the_optt_lever(self):
+        """R12c (round 10, B1): an MST no longer lifts the SOFT -7 Gapmin
+        (LS-DYNA's single-surface card has no SURFB): SST 0.1 writes 0.1 and
+        the OPTT lever is named. (The old (0.1 + 1.0)/2 = 0.55 engaged the
+        cards at 0.55 against LS-DYNA's 0.1; the new card engages at
+        max(0.1, t) = 0.35, and OPTT 0.1 reaches 0.1.)"""
         res, s, _e = _convert(_k1a_deck(_k1a_ass(
             31, 1, 2, card3=(0, 0, 0.1, 1.0),
             kw="CONTACT_AUTOMATIC_GENERAL_ID", tail=_row(-7) + "\n")))
-        self.assertEqual(_type7(s, 31)["gapmin"], 0.55)
-        self.assertFalse(_has(res.warnings, "*PART_CONTACT OPTT"),
-                         res.warnings)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.1)
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "MST 1 is not used"),
+                        res.warnings)
+        self.assertTrue(_has(res.warnings, "*PART_CONTACT OPTT 0.1"),
+                        res.warnings)
 
     def test_soft_7_without_sst_says_nothing(self):
         """R12d: no Card-3 SST - no 'OPTT 0' advice."""
@@ -4422,6 +5148,88 @@ class SrndeIshapeReviewPins(unittest.TestCase):
             extra=_card_nset()))
         self.assertIn("/INTER/TYPE25/16", s)
         self.assertFalse(_has(res.warnings, "16:", _REACH), res.warnings)
+
+
+def _control_contact(n_cards: int, shledg=1) -> str:
+    """*CONTROL_CONTACT with Card 1's SLSFAC 0.1 and *n_cards* cards in all;
+    a 6-card one carries SHLEDG *shledg* in Card 6 field 1 (Vol I R17
+    p.12-79)."""
+    cards = [_row(0.1)] + [_row() for _ in range(n_cards - 1)]
+    if n_cards >= 6:
+        cards[5] = _row(shledg)
+    return "*CONTROL_CONTACT\n" + "\n".join(cards) + "\n"
+
+
+class SrndeControlContactShledg(unittest.TestCase):
+    """Round 10, B7 (inside --no-srnde-ishape): *CONTROL_CONTACT Card 6
+    SHLEDG is read, and a SOFT 2 card with Card D SHLEDG 0 takes it ('EQ.0:
+    Default to SHLEDG on *CONTROL_CONTACT', Vol I R17 p.11-111): 'SRNDE is
+    ignored unless SHLEDG is 0 on both *CONTACT and *CONTROL_CONTACT'
+    (p.11-117), so a SOFT 2 card under a control SHLEDG 1 writes Ishape 0
+    and says SRNDE is not used. SOFT 0 / 1 are untouched (the sentence is in
+    the SOFT 2 paragraph)."""
+
+    def test_a_control_shledg_turns_srnde_off_on_soft_2(self):
+        res, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(2,))),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "0")
+        self.assertTrue(_has(res.warnings, "21: Card E SRNDE 1 is not used",
+                             "*CONTROL_CONTACT SHLEDG 1", "p.12-79",
+                             "p.11-111", "p.11-117"), res.warnings)
+
+    def test_a_short_control_card_reads_shledg_0(self):
+        for n in (2, 5):
+            with self.subTest(cards=n):
+                _r, s, _e = _convert(_k1a_deck(
+                    _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(2,))),
+                    extra=_control_contact(n)))
+                self.assertEqual(_ishape(s, 21), "2")
+
+    def test_soft_0_ignores_the_control_shledg(self):
+        _r, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1)),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "2")
+
+    def test_soft_1_ignores_the_control_shledg(self):
+        """The SOFT 1 twin (the docstring's 'SOFT 0 / 1 are untouched' had
+        no SOFT 1 case: treating SOFT 1 like SOFT 2 survived the whole suite,
+        the round-10 code validator's b7_soft1): Ishape 2, and no sentence
+        that names SOFT 2."""
+        res, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(1,))),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "2")
+        self.assertFalse(_has(res.warnings, "21: Card E SRNDE 1 is not used"),
+                         res.warnings)
+        self.assertFalse(_has(res.warnings, "with SOFT 2, *CONTROL_CONTACT "
+                              "SHLEDG"), res.warnings)
+
+    def test_card_d_keeps_precedence(self):
+        res, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, shledg=1,
+                                             card_a=(2,))),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "0")
+        self.assertTrue(_has(res.warnings, "21: Card E SRNDE 1 is not used",
+                             "SHLEDG 1 (Card D)"), res.warnings)
+        self.assertFalse(_has(res.warnings, "21:",
+                              "*CONTROL_CONTACT SHLEDG"), res.warnings)
+
+    def test_the_control_card_is_read(self):
+        st = _dispatch(_k1a_deck(_k1a_ass(21, 0, 0),
+                                 extra=_control_contact(6)))
+        self.assertEqual(st.ctrl_contact.shledg, 1)
+        st = _dispatch(_k1a_deck(_k1a_ass(21, 0, 0),
+                                 extra=_control_contact(5)))
+        self.assertEqual(st.ctrl_contact.shledg, 0)
+
+    def test_the_opt_out_keeps_ishape_0(self):
+        _r, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(2,))),
+            extra=_control_contact(6)), srnde_ishape=False)
+        self.assertEqual(_ishape(s, 21), "0")
 
 
 class Soft2EdgeGateReviewPins(unittest.TestCase):
@@ -4648,11 +5456,30 @@ class DbExtentBinaryMaxintNamed(unittest.TestCase):
                              "MAXINT -5", "no averaging", "not written"),
                         res.warnings)
 
-    def test_maxint_3_or_blank_or_minus_3_say_nothing(self):
-        for cell in ("", 3, 2, 0, -3):
+    def test_maxint_3_or_blank_say_nothing(self):
+        for cell in ("", 3, 2, 0):
             with self.subTest(maxint=cell):
                 res, _s, _e = _convert(_deck(extra=self._ext(0, 0, cell)))
                 self.assertFalse(_has(res.warnings, "MAXINT"), res.warnings)
+
+    def test_maxint_minus_3_to_minus_1_is_named(self):
+        """R14 round 10, A14: -3 .. -1 ask for LS-DYNA's per-point output
+        too (no averaging, p.16-67); the engine deck keeps MEMB / UPPER /
+        LOWER, UPPER / LOWER being the mean over the NPTR x NPTS in-plane
+        points (tensorc.F:179, 835-840) - no byte moves."""
+        _r, s0, e0 = _convert(_deck(extra=self._ext(0, 0, 3)))
+        for cell in (-3, -2, -1):
+            with self.subTest(maxint=cell):
+                res, s, eng = _convert(_deck(extra=self._ext(0, 0, cell)))
+                self.assertNotIn(self._ALL, eng)
+                self.assertEqual((s, eng), (s0, e0))
+                hits = [w for w in res.warnings if "MAXINT" in w]
+                self.assertEqual(len(hits), 1, hits)
+                for needle in (f"MAXINT {cell} (< 0: |MAXINT| = {-cell} ",
+                               "no averaging", "p.16-67",
+                               "STRESS/MEMB / UPPER / LOWER",
+                               "tensorc.F:179, 835-840", "not reproduced"):
+                    self.assertIn(needle, hits[0])
 
 
 class Inacti5Wording(unittest.TestCase):

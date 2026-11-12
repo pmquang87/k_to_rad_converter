@@ -56,6 +56,7 @@ __all__ = [
     "_seatbelt_2d_part_ids",
     "_ams_is_emitted",
     "rigid_part_ids",
+    "single_surface_scope",
     "AUTO_IMPLICIT_STUB_TITLE",
 ]
 
@@ -165,6 +166,43 @@ def rigid_part_ids(state: ConversionState) -> Set[int]:
     return out
 
 
+def single_surface_scope(state: ConversionState, c) -> Optional[List[int]]:
+    """The parts of a ``state.contacts_single`` record *c* that takes the
+    ALL-PARTS route (the explicit ``/INTER/TYPE25`` self-contact over one
+    ``/SURF/PART/EXT``, the implicit all-parts ``/INTER/TYPE7`` recipe), or
+    None when its SSID names the set of an ``/INTER/TYPE7`` self-contact (or
+    the card is dropped). The ONE predicate every consumer of "is this
+    single-surface card the all-parts self-contact?" tests (round 10, B2).
+
+    * SSID = 0: every part (Vol I R17 p.11-24, SURFA "EQ.0: Includes all
+      parts in the case of single surface contact types").
+    * SURFATYP 5 with a stated SSID: every part, on both routes - "EQ.5:
+      Include all non-spot-weld parts (the SURFA field is ignored)",
+      p.11-25.
+    * SURFATYP 6 with a stated SSID, on an EXPLICIT deck: every part except
+      those of ``*SET_PART`` SSID - "EQ.6: Part set ID for exempted parts.
+      All non-exempted parts (except spot-weld parts) are included in the
+      contact", p.11-25 - when that set exists and leaves a part; the
+      implicit all-parts ``/INTER/TYPE7`` recipe minus a set has no probe,
+      so an implicit card is dropped by name (ROADMAP round-10 NOT entry 12).
+    * ``--no-surfatyp-all-parts`` (``ConvertOptions.surfatyp_all_parts``
+      False): SSID = 0 only, the cards before round 10.
+    """
+    all_pids = sorted(state.parts.keys())
+    if c.ssid == 0:
+        return all_pids
+    if not state.options.surfatyp_all_parts:
+        return None
+    if c.sstyp == 5:
+        return all_pids
+    if (c.sstyp == 6 and not state.is_implicit
+            and c.ssid in state.part_sets):
+        exempt = set(state.part_sets[c.ssid][1])
+        rest = [p for p in all_pids if p not in exempt]
+        return rest or None
+    return None
+
+
 def _ams_is_emitted(state: ConversionState) -> bool:
     """Will this deck actually carry ``/DT/AMS`` (and the starter ``/AMS``)?
 
@@ -261,11 +299,19 @@ ISHELL_QEPH = 24    # reduced integration, PHYSICALLY stabilised (Q4 + EPH)
 #: name -> Ishell, for the user-facing ``shell_formulation`` option.
 SHELL_FORMULATIONS = {"qbat": ISHELL_QBAT, "qeph": ISHELL_QEPH}
 
-# LS-DYNA shell ELFORMs k2rad maps to QEPH regardless of the option: already
-# reduced-integration / co-rotational forms whose Radioss counterpart is
-# unambiguous. Everything else — ELFORM=2 (Belytschko-Tsay) above all, the
-# most common shell formulation in LS-DYNA decks — has no exact counterpart
-# and falls through to the user's choice.
+# LS-DYNA shell ELFORMs k2rad maps to QEPH (Ishell 24) regardless of the
+# option. They are FULLY integrated forms in LS-DYNA (Vol I R17 p.41-64), and
+# dyna2rad writes them Ishell 12 (convertprops.cxx:781-783); k2rad keeps 24
+# because it is MEASURED better on the only explicit carriers (R14 round 10,
+# three ELFORM 9 decks, nt 4): Ishell 12 worsens the internal-energy RMS on
+# all three - tire-compression 8.59 -> 9.50 %, the two airbag.deploy decks
+# 12.63 -> 21.94 % and 43.78 -> 50.35 % of the LS peak - and on the two fabric
+# airbags it runs QBAT at N 1, the one-point QBAT path measured unstable at
+# the engine's own step on a cantilever (ENERGY ERROR at cycles 81-88).
+# ELFORM -16 / 20 / 21 / 26 have no explicit carrier on any corpus (implicit
+# decks get 24 for every ELFORM). Everything else — ELFORM=2
+# (Belytschko-Tsay) above all, the most common shell formulation in LS-DYNA
+# decks — has no exact counterpart and falls through to the user's choice.
 _ELFORM_ALWAYS_QEPH = {-16, 9, 20, 21, 26}
 
 

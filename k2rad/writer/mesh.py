@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import weakref
 from collections import defaultdict
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 from ..state import (
     AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS, PLANE_STRESS_ELFORMS,
     ConversionState,
@@ -2203,8 +2203,10 @@ def _solid_hg_screens(state: ConversionState) -> SolidHourglassScreens:
 
     * **deck_enabled** — a deck carrying ``*INITIAL_STRESS_SECTION`` keeps its
       ELFORM Isolid everywhere. ``writer/preload._PRELOAD_STABLE_ISOLID`` is
-      ``{5, 14, 17}``: measured on a 1x1x4 hex bar at /PRELOAD Itype=2 /
-      200 MPa, **Isolid 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0**. The
+      ``{5, 14, 17}``: measured on a 1x1x4 hex bar clamped at both ends at
+      /PRELOAD Itype=2 / 200 MPa, **Isolid 1 and 2 lose the cut element
+      right after the hold** (ZERO OR NEGATIVE VOLUME and a time-step stop
+      at t 2.27e-5 / 2.30e-5 s of a 2e-4 s window). The
       screen is deck-wide rather than per-section because the preloaded parts
       are only known once the cross-section cut has been resolved, in a writer
       pass that runs much later than this one; a deck-wide screen can only fail
@@ -2591,10 +2593,15 @@ def _tet_section_isolid(state: ConversionState, sec: Optional[SectionSolid],
     what the deck's hourglass control says, and ``_elform_to_isolid`` keeps
     returning 14 for the hourglass gate and the tet tests that key on it.
     A 17 (ELFORM 2 or 16 on tets) is left as written too:
-    the starter runs that tet group at Isolid 1 as well, but a 17 draws no
-    WARNING 791 (that one is for a LAW1 group at 14 / 15,
-    ``sgrtails.F:695-704``) and lies outside K-30's ELFORM 10 / 13 scope.
-    ``--no-tet-isolid1`` writes the 14."""
+    the starter runs that tet group at Isolid 1 as well (``sgrtails.F:984-999``,
+    silently for /TETRA10: its WARNING 341 is commented out at :990-995), a 17
+    draws no WARNING 791 (that one is for a LAW1 group at 14 / 15,
+    ``sgrtails.F:695-704``) and it lies outside K-30's ELFORM 10 / 13 scope.
+    MEASURED (R14 round 10): 3.1_Elastic_Beams_etc's all-tet ELFORM 16
+    section at Isolid 17 and an Isolid-1 twin print equal cycle rows (nt 1,
+    six pairs) and differ only in the starter's property echo. A section
+    holding a /BRICK keeps its ELFORM's Isolid. ``--no-tet-isolid1`` writes
+    the 14."""
     if (isolid == 14 and sec is not None and state.options.tet_isolid1
             and sec.secid in _tet_only_solid_secids(state)):
         return 1
@@ -2635,19 +2642,22 @@ def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
     (``_target_mat_law`` 1: ``*MAT_ELASTIC``, and ``*MAT_RIGID``, written as
     /MAT/ELAST for its /RBODY), and three exclusions hold:
 
-    * its NIP is not 1 (the plan keeps NIP 1 as it was). A NIP-1 section
-      keeps the N 2 k2rad has always written (max(2, NIP)), and the starter
-      still switches that LAW1 group to N = 0 with WARNING 1084, like every
-      LAW1 group written N > 1 (``cgrtails.F:780-791``; a /SH3N group
-      silently, ``c3grtails.F:710``). So it runs the same global integration
-      a K-31 section is written with, and keeps the warning. LS-DYNA's own
-      NIP 1 - one point, no bending (Vol I R17 p.41-66) - is reproduced on
-      neither arm: that would take N = 1, which both switches leave alone
-      and on which the starter zeroes Ashear and turns Ishell 0 / 2 into 1
-      with WARNING 322 (``hm_read_prop01.F:246-259``) - not measured, a
-      ROADMAP item. MEASURED (starter + engine, nt 1, 2026-10-31): a NIP-1
-      *MAT_ELASTIC strip is written N 2 on both arms and prints 1 x WARNING
-      1084 on both (anim files byte-equal, T01 equal);
+    * its NIP is not 1. A NIP-1 section is not a K-31 section. Since R14
+      round 10 (A2, :func:`_nip1_one_point_secids`, ``--no-nip1-one-point``
+      opts out) it is written N 1 - LS-DYNA's own one point, no bending (Vol
+      I R17 p.41-66), which both starter switches leave alone and on which
+      the starter zeroes Ashear and turns Ishell 0 / 2 into 1 with WARNING
+      322 (``hm_read_prop01.F:246-259``; Ishell 12 / 24 are left alone) -
+      when all its shell elements are triangles; with quadrilaterals (or an
+      initial-state record) it keeps max(2, NIP) = 2, and the starter
+      switches that LAW1 group to N = 0 with WARNING 1084 like every LAW1
+      group written N > 1 (``cgrtails.F:780-791``; a /SH3N group silently,
+      ``c3grtails.F:710``). MEASURED (starter + engine, nt 1, 2026-10-31): a
+      NIP-1 *MAT_ELASTIC quad strip is written N 2 on both K-31 arms and
+      prints 1 x WARNING 1084 on both (anim files byte-equal, T01 equal);
+      (R14 round 10, on the shipped default bytes, nt 4) a /SH3N
+      cantilever's NIP-1 strips hang (tip -81.9 .. -82.7 mm, the hold-window
+      mean) where N 2 bends (-0.4761 mm, Euler-Bernoulli 0.47619 mm);
     * no ``*INITIAL_STRESS_SHELL`` / ``*INITIAL_STRAIN_SHELL`` record names
       one of its elements, directly or through a ``*SET_SHELL``: an /INISHE
       record carries one station per through-thickness point and
@@ -2697,21 +2707,7 @@ def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
     part_secids = {pid: (p.secid if p.secid > 0 else pid)
                    for pid, p in state.parts.items()}
     eid2pid = {e.eid: e.pid for e in state.shell_elems}
-    touched: Set[int] = set()
-    for rec in state.ini_stress_shells:
-        sid = part_secids.get(eid2pid.get(rec.eid, 0))
-        if sid is not None:
-            touched.add(sid)
-    for rec in state.ini_strain_shells:
-        if getattr(rec, "is_set", False):
-            entry = state.shell_sets.get(rec.eid)
-            eids = list(entry[1]) if entry else []
-        else:
-            eids = [rec.eid]
-        for eid in eids:
-            sid = part_secids.get(eid2pid.get(eid, 0))
-            if sid is not None:
-                touched.add(sid)
+    touched = _ini_state_shell_secids(state, part_secids, eid2pid)
     law_of: Dict[int, Optional[int]] = {}
     seen: Set[int] = set()
     other: Set[int] = set()
@@ -2732,10 +2728,231 @@ def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
         if sid in state.sec_shells and state.sec_shells[sid].nip != 1)
 
 
-def _shell_prop_n(sec: SectionShell, global_n: FrozenSet[int]) -> int:
-    """The /PROP/SHELL N cell: 0 on a K-31 section (``_law1_global_n_secids``),
-    else ``max(2, NIP)``, the value k2rad has always written."""
-    return 0 if sec.secid in global_n else max(2, sec.nip)
+def _ini_state_shell_secids(state: ConversionState,
+                            part_secids: Dict[int, int],
+                            eid2pid: Dict[int, int]) -> Set[int]:
+    """The ``*SECTION_SHELL`` ids an ``*INITIAL_STRESS_SHELL`` /
+    ``*INITIAL_STRAIN_SHELL`` record names (directly or through a
+    ``*SET_SHELL``): writer/inistate writes their /INISHE stations for
+    N = max(2, NIP), so neither K-31 nor A2 (R14 round 10) changes their N.
+    (Moved out of :func:`_law1_global_n_secids` unchanged.)"""
+    touched: Set[int] = set()
+    for rec in state.ini_stress_shells:
+        sid = part_secids.get(eid2pid.get(rec.eid, 0))
+        if sid is not None:
+            touched.add(sid)
+    for rec in state.ini_strain_shells:
+        if getattr(rec, "is_set", False):
+            entry = state.shell_sets.get(rec.eid)
+            eids = list(entry[1]) if entry else []
+        else:
+            eids = [rec.eid]
+        for eid in eids:
+            sid = part_secids.get(eid2pid.get(eid, 0))
+            if sid is not None:
+                touched.add(sid)
+    return touched
+
+
+#: R14 round 10, A2: the 2-D ELFORMs on which the through-thickness
+#: integration "is not meaningful" (Vol I R17 p.41-67), so NIP 1 means
+#: nothing there and A2 leaves them alone.
+_TWO_D_SHELL_ELFORMS_A2 = frozenset({12, 13, 14, 15, 43, 44, 52, 55, 29, -29})
+
+
+def _nip1_one_point_secids(state: ConversionState, force: bool = False
+                           ) -> Tuple[FrozenSet[int], Dict[int, str]]:
+    """R14 round 10, A2 (``nip1_one_point``, default ON,
+    ``--no-nip1-one-point``): ``(the sections written /PROP/SHELL N 1,
+    {secid: why kept at max(2, NIP)})``.
+
+    A ``*SECTION_SHELL`` with NIP 1 (stated, or a one-point
+    ``*INTEGRATION_SHELL`` - writer/composites pushes the rule's count onto
+    ``sec.nip`` before this runs) and a 3-D ELFORM, all of whose shell
+    elements are triangles (3 nodes, or n3 == n4), is written N 1: LS-DYNA's
+    one point, no bending (Vol I R17 p.41-66), which no starter switch
+    touches (``c3grtails.F:710``) and on which the starter zeroes Ashear
+    itself (``hm_read_prop01.F:246-259``). Kept at max(2, NIP) = 2 and named:
+    a section with quadrilaterals (``"quads"``: the one-point QBAT / QEPH
+    quads diverged in the round-10 probes) and one an initial-state record
+    names (``"initial state"``: writer/inistate writes its stations for
+    max(2, NIP)). A section without shell elements is not touched. *force*:
+    the set the default would write, whatever the option says (for the
+    opt-out's sentence)."""
+    if not (force or state.options.nip1_one_point):
+        return frozenset(), {}
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    eid2pid = {e.eid: e.pid for e in state.shell_elems}
+    tri: Dict[int, int] = defaultdict(int)
+    quad: Dict[int, int] = defaultdict(int)
+    for e in state.shell_elems:
+        sid = part_secids.get(e.pid)
+        if sid is None:
+            continue
+        nd = list(e.nodes)
+        if len(nd) == 3 or (len(nd) == 4 and nd[2] == nd[3]):
+            tri[sid] += 1
+        else:
+            quad[sid] += 1
+    touched = _ini_state_shell_secids(state, part_secids, eid2pid)
+    one: Set[int] = set()
+    kept: Dict[int, str] = {}
+    for sid, sec in state.sec_shells.items():
+        if sec.nip != 1 or sec.elform in _TWO_D_SHELL_ELFORMS_A2:
+            continue
+        if tri.get(sid, 0) + quad.get(sid, 0) == 0:
+            continue
+        if quad.get(sid, 0):
+            kept[sid] = "quads"
+        elif sid in touched:
+            kept[sid] = "initial state"
+        else:
+            one.add(sid)
+    return frozenset(one), kept
+
+
+def _shell_prop_n(sec: SectionShell, global_n: FrozenSet[int],
+                  one_point: FrozenSet[int] = frozenset()) -> int:
+    """The /PROP/SHELL N cell: 0 on a K-31 section (``_law1_global_n_secids``,
+    never a NIP-1 one), 1 on a round-10 A2 section
+    (``_nip1_one_point_secids``), else ``max(2, NIP)``, the value k2rad has
+    always written."""
+    if sec.secid in global_n:
+        return 0
+    if sec.secid in one_point:
+        return 1
+    return max(2, sec.nip)
+
+
+#: R14 round 10, A1: the LS-DYNA *SECTION_SHELL ELFORMs on which SHRF acts on
+#: nothing - the membranes 5 / 9 (no bending, no transverse shear) and the
+#: two-dimensional ELFORMs 12-15 / 43 / 44 / 52 / 55 / +-29, whose
+#: through-thickness integration "is not meaningful" (Vol I R17 p.41-67). A
+#: NIP-1 section is the third class: one point, no bending (p.41-66), and on
+#: an N-1 property the starter zeroes Ashear itself (hm_read_prop01.F:246-259).
+_SHRF_NO_SHEAR_ELFORMS = frozenset({5, 9, 12, 13, 14, 15, 43, 44, 52, 55,
+                                    29, -29})
+#: A1: the BCIZ (3) and DK (17, 18) Kirchhoff-type shells LS-DYNA does not
+#: apply SHRF to (Vol I R17 p.41-66). k2rad writes them as the Mindlin
+#: /PROP/SHELL Ishell 12 / 24 with Ashear = the rule's value (the nearer
+#: stand-in for a shear-rigid element) and names them.
+_SHRF_KIRCHHOFF_ELFORMS = frozenset({3, 17, 18})
+#: A1: a stated SHRF within this of 5/6 keeps the Ashear cell 0, which the
+#: starter turns into its own 5/6 (hm_read_prop01.F:244): 0.83 / 0.833 /
+#: 0.8333 / 0.83333 all are (the ~5/6 sections stay byte-identical). The K-32
+#: _SHRF_FIVE_SIXTHS_TOL (1e-3, below) is the window sentence's lower edge
+#: and the --no-shrf-ashear sentence's threshold.
+_SHRF_ASHEAR_FIVE_SIXTHS_WINDOW = 0.005
+
+
+def _shrf_excluded(sec: SectionShell) -> bool:
+    """A1's exclusion: NIP 1 (the EFFECTIVE count - writer/composites pushes a
+    one-point *INTEGRATION_SHELL's count onto ``sec.nip`` before the
+    properties are written), a membrane ELFORM 5 / 9 or a 2-D ELFORM."""
+    return sec.nip == 1 or sec.elform in _SHRF_NO_SHEAR_ELFORMS
+
+
+def _shrf_rule(sec: SectionShell, exclude: bool = True) -> Optional[float]:
+    """R14 round 10, A1: THE rule for the /PROP/SHELL Ashear cell of a deck
+    section, the option aside - the one predicate the cell
+    (:func:`_shrf_ashear`) and every SHRF sentence (:func:`_shrf_note_class`)
+    read. None = the literal ``0`` k2rad has always written (the starter's
+    5/6, hm_read_prop01.F:244).
+
+    * no deck card (``card_given`` False: k2rad's own placeholder sections)
+      -> None;
+    * *exclude* and :func:`_shrf_excluded` -> None (LS-DYNA shears none of
+      them; ``exclude=False`` is the rule without the exclusion, for the
+      exclusion's own sentence);
+    * SHRF blank / 0 -> 1.0, LS-DYNA's default (Vol I R17 p.41-63; its d3hsp
+      echoes ``shear area factor = 1.0`` on every such R14 part);
+    * |SHRF - 5/6| < 0.005 -> None;
+    * 0 < SHRF <= 1 -> SHRF as stated;
+    * SHRF < 0 or > 1 -> 1.0 (named)."""
+    if not sec.card_given:
+        return None
+    if exclude and _shrf_excluded(sec):
+        return None
+    v = sec.shrf
+    if v == 0.0:
+        return 1.0
+    if abs(v - 5.0 / 6.0) < _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW:
+        return None
+    return v if 0.0 < v <= 1.0 else 1.0
+
+
+def _shrf_ashear(state: ConversionState,
+                 sec: Optional[SectionShell]) -> Optional[float]:
+    """R14 round 10, A1 (``shrf_ashear``, default ON, ``--no-shrf-ashear``):
+    the /PROP/SHELL Ashear cell of section *sec* at both emission sites (the
+    per-section loop and the per-part hourglass split), or None for the
+    literal ``0``: :func:`_shrf_rule` when the option is on, else None."""
+    if sec is None or not state.options.shrf_ashear:
+        return None
+    return _shrf_rule(sec)
+
+
+def _note_shrf_route_section(state: ConversionState, sec: SectionShell,
+                             kind: str) -> None:
+    """R14 round 10, verification round (findings 6.32 (2)(f)): a
+    *SECTION_SHELL written on *kind* (/PROP/TYPE9, /PROP/TYPE11 or the
+    /PROP/TYPE51 of a rule layup), whose Ashear cell k2rad writes 0 or
+    0.833333 - the starter's 5/6 either way (hm_read_prop09.F:266,
+    hm_read_prop11.F:280, hm_read_prop51.F:255). Recorded when the A1 rule
+    gives LS-DYNA's factor a value away from 5/6 (:func:`_shrf_rule`: not an
+    excluded, ~5/6 or placeholder section). Text only."""
+    ls = _shrf_rule(sec)
+    if ls is not None:
+        state.shrf_other_routes.append(("*SECTION_SHELL", sec.secid, kind,
+                                        sec.shrf, ls))
+
+
+def _note_shrf_route_composite(state: ConversionState, pid: int, shrf: float,
+                               elform: int, cell: float) -> None:
+    """The *PART_COMPOSITE twin of :func:`_note_shrf_route_section`: its
+    /PROP/TYPE51 carries a stated 0 < SHRF <= 1 and writes 0.833333 for any
+    other value, where LS-DYNA's default is 1.0 (Vol I R17 *PART_COMPOSITE
+    Card 3a). Recorded when the cell is not the factor LS-DYNA runs."""
+    if elform in _SHRF_NO_SHEAR_ELFORMS:
+        return
+    ls = shrf if shrf != 0.0 else 1.0
+    if abs(ls - cell) >= _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW:
+        state.shrf_other_routes.append(("*PART_COMPOSITE", pid,
+                                        "/PROP/TYPE51", shrf, ls))
+
+
+def _warn_shrf_other_routes(state: ConversionState) -> List[str]:
+    """ONE sentence per deck naming the sections / composite parts on the
+    shell routes the SHRF rule does not reach (the records of
+    :func:`_note_shrf_route_section` / :func:`_note_shrf_route_composite`,
+    10 named at most). Writes no line; a starter-registry step after the
+    composite and fabric properties (writer/assembly)."""
+    seen: Dict[Tuple[str, int, str], float] = {}
+    for label, ident, kind, shrf, _ls in state.shrf_other_routes:
+        seen.setdefault((label, ident, kind), shrf)
+    if not seen:
+        return []
+    items = []
+    for (label, ident, kind), shrf in sorted(seen.items()):
+        what = ("SHRF blank: LS-DYNA's 1.0" if shrf == 0.0 else
+                f"SHRF {shrf:g}" if 0.0 < shrf <= 1.0 else
+                f"SHRF {shrf:g}, outside (0, 1]")
+        items.append(f"{label} {ident} ({what}) -> {kind}")
+    shown = "; ".join(items[:10]) + (f"; ... ({len(items)} in all)"
+                                     if len(items) > 10 else "")
+    state.warn(
+        f"{shown}: a shell route the SHRF rule (R14 round 10: /PROP/SHELL "
+        "Ashear = SHRF) does not reach - k2rad writes the property's Ashear "
+        "cell 0 (/PROP/TYPE9) or 0.833333 (/PROP/TYPE11, the /PROP/TYPE51 "
+        "of an *INTEGRATION_SHELL layup or of a *PART_COMPOSITE without a "
+        "stated 0 < SHRF <= 1), so it runs at the starter's 5/6 "
+        "(hm_read_prop09.F:266, hm_read_prop11.F:280, hm_read_prop51.F:255 "
+        "turn a 0 into 5/6) where LS-DYNA runs the stated SHRF or, for a "
+        "blank / 0, its default 1.0 (Vol I R17 p.41-63; *PART_COMPOSITE "
+        "Card 3a). Carrying the rule to these routes is a ROADMAP item; no "
+        "byte moves here.")
+    return []
 
 
 # LS-DYNA cohesive solid formulations (*SECTION_SOLID Vol I R16 p.41-88):
@@ -3166,15 +3383,20 @@ def _shell_istrain_flag(state: ConversionState) -> int:
 
 def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
                      istrain: int, thick: float,
-                     hcoef: Optional[float] = None) -> List[str]:
+                     hcoef: Optional[float] = None,
+                     ashear: Optional[float] = None) -> List[str]:
     """/PROP/SHELL (TYPE1), byte-identical to the historical inline block.
     *hcoef* None → Hm/Hf/Hr stay 0 (Radioss default 0.01); otherwise the
     (clamped) hourglass coefficient is written into all three membrane/bending/
-    rotation slots. Shared by the per-section and per-part paths."""
+    rotation slots. *ashear* None → the Ashear cell is the literal ``0`` (the
+    starter's 5/6, hm_read_prop01.F:244); otherwise ``_f(ashear)`` in cols
+    41-60 (R14 round 10, A1: :func:`_shrf_ashear`). Shared by the
+    per-section and per-part paths."""
     if hcoef is not None:
         hg_card = f"{_f(hcoef)}{_f(hcoef)}{_f(hcoef)}{_f(0.0)}{_f(0.0)}"
     else:
         hg_card = f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}"
+    ash = _f(ashear) if ashear is not None else "                   0"
     return [
         f"/PROP/SHELL/{prop_id}",
         title,
@@ -3183,7 +3405,7 @@ def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
         "#                 hm                  hf                  hr                  dm                  dn",
         hg_card,
         "#        N   Istrain               Thick              Ashear              Ithick     Iplas",
-        f"{_i(nip)}{_i(istrain)}{_f(thick)}                   0                   0         0",
+        f"{_i(nip)}{_i(istrain)}{_f(thick)}{ash}                   0         0",
         HDR,
     ]
 
@@ -3515,7 +3737,10 @@ def _make_properties(state: ConversionState) -> List[str]:
     # K-31 (--no-law1-shell-global-n opts out): an all-LAW1 section is written
     # N = 0, the global integration cgrtails.F:780-791 switches it to anyway.
     global_n = _law1_global_n_secids(state)
-    shrf_stated: List[Tuple[int, float]] = []
+    # R14 round 10, A2 (--no-nip1-one-point opts out): a NIP-1 section of
+    # triangles only is written N 1, LS-DYNA's one point
+    one_point, nip1_kept = _nip1_one_point_secids(state)
+    shrf_notes: Dict[str, List[SectionShell]] = defaultdict(list)
     # a deck routed to the 2-D axisymmetric deck rewrites its ELFORM 14 / 15
     # /PROP/SHELL as /PROP/SOLID (writer/axisym2d): no Ashear, no SHRF note
     plan = state.axisym_plan
@@ -3525,18 +3750,24 @@ def _make_properties(state: ConversionState) -> List[str]:
             continue
         ishell = _elform_to_ishell(sec.elform, state.is_implicit,
                                   state.options.shell_default_ishell)
-        nip = _shell_prop_n(sec, global_n)
+        nip = _shell_prop_n(sec, global_n, one_point)
         # Shared section prop carries the global *CONTROL_HOURGLASS coefficient
         # (its base); parts with a different *HOURGLASS are split out below.
         hm, _ = _shell_hg_values(state, sec, None)
+        # R14 round 10, A1 (--no-shrf-ashear opts out): the Ashear cell
+        # carries the section's SHRF (_shrf_ashear, the one rule)
         lines += _emit_prop_shell(sec.secid, sec.title or f"PROP_{sec.secid}",
-                                  ishell, nip, istrain, sec.t1, hcoef=hm)
-        # K-32: a stated SHRF that is not the 5/6 the starter supplies for
-        # the Ashear 0 written above is named (_warn_shell_shrf_not_converted)
-        if (sec.shrf and abs(sec.shrf - 5.0 / 6.0) > _SHRF_FIVE_SIXTHS_TOL
-                and sec.elform not in shrf_routed_ef):
-            shrf_stated.append((sec.secid, sec.shrf))
-    _warn_shell_shrf_not_converted(state, shrf_stated)
+                                  ishell, nip, istrain, sec.t1, hcoef=hm,
+                                  ashear=_shrf_ashear(state, sec))
+        # A1: what that cell did with the deck's SHRF, named once per deck
+        # and class by _warn_shell_shrf (the K-32 'NOT converted' note of
+        # ed52c93 survives as the --no-shrf-ashear sentence only)
+        if sec.elform not in shrf_routed_ef:
+            cls = _shrf_note_class(state, sec)
+            if cls:
+                shrf_notes[cls].append(sec)
+    _warn_shell_shrf(state, shrf_notes)
+    _warn_nip1_one_point(state, one_point, nip1_kept)
     cohesive_secids = _cohesive_solid_secids(state)
     # (secid, elform, emitted Isolid, emitted h) for every solid section whose
     # Isolid the LS-DYNA-default hourglass synthesis actually MOVED — reported
@@ -5390,50 +5621,254 @@ def _warn_elform16_formulation(state: ConversionState, ishell: int) -> None:
         f"ELFORM 16, convertprops.cxx:779-785), {_ELFORM16_QEPH_MEASURED}.")
 
 
-#: K-32: a stated SHRF this close to 5/6 is the value the starter supplies
-#: for the Ashear 0 k2rad writes (0.833, 0.8333 and 0.8333333 all are).
+#: K-32: a stated SHRF this close to 5/6 IS the value the starter supplies
+#: for an Ashear 0 (0.833, 0.8333 and 0.8333333 all are): nothing to name.
+#: R14 round 10, A1: between it and _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW (0.005)
+#: the cell stays 0 and the window sentence names the substitution (0.83 ->
+#: 5/6); the --no-shrf-ashear sentence names every stated value beyond it,
+#: as the K-32 note of ed52c93 did.
 _SHRF_FIVE_SIXTHS_TOL = 1.0e-3
 
+#: A1: the measurement every SHRF sentence cites, ONE constant so that the
+#: code, the --help text, README and CHANGELOG cannot drift (R14 round-10
+#: census g1a and critic G1: a clamped Timoshenko cantilever, Ashear 1.0
+#: against 5/6, explicit and implicit, nt 4 = nt 2; the d3hsp part echoes of
+#: the R14 LS-DYNA reference runs).
+_SHRF_MEASURED = (
+    "MEASURED on a clamped cantilever coupon: each Ashear reproduces its own "
+    "Timoshenko closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on quads "
+    "and -0.024 / -0.025 % on /SH3N triangles; LS-DYNA's d3hsp echoes "
+    "'shear area factor = 1.0' on all 2642 R14 shell parts whose SHRF is "
+    "blank, 0 or 1.0")
 
-def _warn_shell_shrf_not_converted(
-        state: ConversionState, stated: List[Tuple[int, float]]) -> None:
-    """K-32: name the ``*SECTION_SHELL`` SHRF values the /PROP/SHELL does not
-    carry, once per deck.
 
-    SHRF (card 1 field 3, the transverse shear correction factor; K-0P
-    stores it as ``SectionShell.shrf``, 0.0 when blank) is NOT converted:
-    /PROP/SHELL Ashear is written 0, which the starter turns into 5/6
-    (``hm_read_prop01.F:244``). Carrying SHRF to Ashear is a ROADMAP round-10
-    item, so the bytes do not move; this only says it. *stated* holds the
-    ``(secid, SHRF)`` of the sections written as a /PROP/SHELL whose SHRF is
-    stated and not 5/6 (``_SHRF_FIVE_SIXTHS_TOL``). A blank SHRF is not
-    listed although it deviates the same way: LS-DYNA reads it as 1.0 (Vol
-    I R17 p.41-63) and the shell runs at 5/6 all the same. The plan names a
-    STATED SHRF only (a blank one sits on nearly every shell deck); the
-    note's last sentence says so to the reader who gets it."""
-    if not stated:
-        return
-    by_value: Dict[float, List[int]] = defaultdict(list)
-    for secid, shrf in stated:
-        by_value[shrf].append(secid)
-    groups = []
-    for value in sorted(by_value):
-        ids = sorted(by_value[value])
-        shown = ", ".join(str(s) for s in ids[:10])
+def _shrf_window(sec: SectionShell) -> bool:
+    """A1: a stated SHRF 1e-3 < |SHRF - 5/6| < 0.005 from 5/6 - kept at the
+    starter's own 5/6 by the rule, and named (the window sentence; under
+    --no-shrf-ashear the opt-out sentence)."""
+    if not sec.card_given or sec.shrf == 0.0:
+        return False
+    d = abs(sec.shrf - 5.0 / 6.0)
+    return _SHRF_FIVE_SIXTHS_TOL < d < _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW
+
+
+def _shrf_note_class(state: ConversionState,
+                     sec: SectionShell) -> Optional[str]:
+    """R14 round 10, A1: which SHRF sentence names section *sec* (None: none
+    does - the cell carries the deck's own value, LS-DYNA's default 1.0 for
+    a blank, or a value within 1e-3 of the starter's 5/6). Read from the
+    same :func:`_shrf_rule` that writes the cell.
+
+    * ``off`` (``--no-shrf-ashear``): the K-32 selection of ed52c93 - every
+      STATED SHRF more than 1e-3 from 5/6, the exclusion included - and every
+      blank / 0 whose cell the default writes (stated AND blank);
+    * ``excluded``: the cell stays 0 under NIP 1 / ELFORM 5 / 9 / a 2-D
+      ELFORM where the rule without the exclusion would write it (a blank,
+      LS-DYNA's echoed 1.0, or a stated value outside the 0.005 window);
+    * ``window``: 1e-3 < |SHRF - 5/6| < 0.005, kept at 5/6;
+    * ``range``: SHRF < 0 or > 1, written as 1.0;
+    * ``kirchhoff``: ELFORM 3 / 17 / 18, written although LS-DYNA does not
+      use the factor there."""
+    if not sec.card_given:
+        return None
+    if not state.options.shrf_ashear:
+        stated = (sec.shrf != 0.0
+                  and abs(sec.shrf - 5.0 / 6.0) > _SHRF_FIVE_SIXTHS_TOL)
+        blank = sec.shrf == 0.0 and _shrf_rule(sec) is not None
+        return "off" if stated or blank else None
+    if _shrf_rule(sec) is None:
+        if _shrf_rule(sec, exclude=False) is not None:
+            return "excluded"
+        return "window" if _shrf_window(sec) else None
+    if not 0.0 <= sec.shrf <= 1.0:
+        return "range"
+    if sec.elform in _SHRF_KIRCHHOFF_ELFORMS:
+        return "kirchhoff"
+    return None
+
+
+def _shrf_groups(secs: List[SectionShell], label: Callable[[SectionShell],
+                 str]) -> List[Tuple[str, List[int]]]:
+    """``[(label, sorted section ids)]`` sorted by label - one entry per
+    distinct label of *secs*."""
+    by: Dict[str, List[int]] = defaultdict(list)
+    for s in secs:
+        by[label(s)].append(s.secid)
+    return [(lab, sorted(by[lab])) for lab in sorted(by)]
+
+
+def _shrf_ids(groups: List[Tuple[str, List[int]]]) -> str:
+    """'1, 2 (label); 7 (label)' with the K-32 10-id cap per group."""
+    out = []
+    for lab, ids in groups:
+        shown = ", ".join(str(i) for i in ids[:10])
         if len(ids) > 10:
             shown += f", ... ({len(ids)} sections)"
-        groups.append(f"{shown} (SHRF {value:g})")
-    state.warn(
-        f"*SECTION_SHELL {'; '.join(groups)}: the stated SHRF, the transverse "
-        "shear correction factor, is NOT converted - the /PROP/SHELL Ashear "
-        "cell is written 0, which the starter turns into 5/6 "
-        "(hm_read_prop01.F:244 'IF(GEO(38)==ZERO) GEO(38)=FIVE_OVER_6'), so "
-        "these shells run with a shear factor of 5/6 whatever SHRF says "
-        "(LS-DYNA's own suggestion for isotropic shells, Vol I R17 p.41-66). "
-        "Carrying SHRF to Ashear is a ROADMAP round-10 item; until then set "
-        "Ashear on the /PROP/SHELL by hand if the factor matters. A section "
-        "that leaves SHRF blank (LS-DYNA's default 1.0, Vol I R17 p.41-63) "
-        "runs at 5/6 the same way and is not listed here.")
+        out.append(f"{shown} ({lab})")
+    return "; ".join(out)
+
+
+def _shrf_label(s: SectionShell) -> str:
+    return "SHRF blank / 0" if s.shrf == 0.0 else f"SHRF {s.shrf:g}"
+
+
+def _shrf_excl_label(s: SectionShell) -> str:
+    return "NIP 1" if s.nip == 1 else f"ELFORM {s.elform}"
+
+
+def _shrf_elform_label(s: SectionShell) -> str:
+    return f"ELFORM {s.elform}"
+
+
+def _warn_shell_shrf(state: ConversionState,
+                     notes: Dict[str, List[SectionShell]]) -> None:
+    """R14 round 10, A1: ONE sentence per class (:func:`_shrf_note_class`) of
+    what the /PROP/SHELL Ashear cell did with the deck's SHRF, once per deck
+    (both emission sites write the cell; only the per-section loop collects
+    the notes, so a section is named once). Nothing is said where the cell
+    carries the deck's own value or LS-DYNA's default 1.0 for a blank. The
+    K-32 'NOT converted' note of ed52c93 is gone from the default path (the
+    factor IS written); under ``--no-shrf-ashear`` one sentence names every
+    section the starter's 5/6 overrides - stated AND blank."""
+    off = notes.get("off")
+    if off:
+        unsheared = sorted(s.secid for s in off if _shrf_excluded(s))
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(off, _shrf_label))}: "
+            "SHRF, the transverse shear correction factor, is NOT carried to "
+            "the /PROP/SHELL Ashear cell (--no-shrf-ashear): the cell is "
+            "written 0, which the starter turns into 5/6 "
+            "(hm_read_prop01.F:244), so these shells run at 5/6 where LS-DYNA "
+            "runs the stated factor or, for a blank / 0, its default 1.0 (Vol "
+            "I R17 p.41-63). " + _SHRF_MEASURED + ". The default writes the "
+            "factor (a value within 0.005 of 5/6 keeps the starter's own 5/6)"
+            + ("" if not unsheared else
+               f"; section(s) {', '.join(str(i) for i in unsheared[:10])}"
+               + (f", ... ({len(unsheared)} sections)"
+                  if len(unsheared) > 10 else "")
+               + " are NIP-1 / membrane / 2-D sections whose cell the "
+               "default keeps 0 too") + ".")
+        return
+    excl = notes.get("excluded")
+    if excl:
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(excl, _shrf_excl_label))}"
+            ": SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0: "
+            "the starter's 5/6, or 0 on an N-1 property): NIP 1 is one point "
+            "with no bending (Vol I R17 "
+            "p.41-66) - on the N-1 property k2rad writes for a triangle-only "
+            "NIP-1 section the starter zeroes Ashear itself "
+            "(hm_read_prop01.F:246-259) and the engine integrates no "
+            "transverse shear (c3coef3.F:134-137), while a NIP-1 section "
+            "kept at N 2 (quadrilaterals, an initial state, "
+            "--no-nip1-one-point) runs at the starter's 5/6; a membrane "
+            "ELFORM 5 / 9 has no bending; on a two-dimensional ELFORM (12-15, "
+            "43, 44, 52, 55, +-29) the through-thickness integration is not "
+            "meaningful (Vol I R17 p.41-67). LS-DYNA's d3hsp still echoes the "
+            "factor on such parts.")
+    kir = notes.get("kirchhoff")
+    if kir:
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(kir, _shrf_elform_label))}"
+            ": SHRF is written to the /PROP/SHELL Ashear cell (blank / 0 -> "
+            "1.0) although LS-DYNA's BCIZ (ELFORM 3) and DK (17, 18) elements "
+            "do not use it (Vol I R17 p.41-66: they are not first-order "
+            "shear-deformation shells). k2rad writes these Kirchhoff-type "
+            "shells as Mindlin /PROP/SHELL elements - Ishell 12 / 24 on the "
+            "quadrilaterals, Ish3n 0 (the starter's default triangle, "
+            "hm_read_prop01.F:193) on the triangles - on which the larger "
+            "factor is the nearer stand-in for a shear-rigid element.")
+    win = notes.get("window")
+    if win:
+        groups = _shrf_groups(win, _shrf_label)
+        values = {_shrf_label(s): s.shrf for s in win}
+        dev = ", ".join(
+            f"{abs(5.0 / 6.0 - values[lab]) / values[lab] * 100.0:.2f} %"
+            for lab, _ids in groups)
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(groups)}: SHRF within 0.005 of 5/6 "
+            "is written as the starter's own 5/6 (Ashear 0, "
+            f"hm_read_prop01.F:244), {dev} from the stated value"
+            + ("s." if len(groups) > 1 else "."))
+    rng = notes.get("range")
+    if rng:
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(rng, _shrf_label))}: "
+            "SHRF outside (0, 1] cannot be a shear correction factor - the "
+            "starter takes any non-zero Ashear unchecked "
+            "(hm_read_prop01.F:161 / :244), so a negative one would be a "
+            "negative transverse shear modulus - and is written as LS-DYNA's "
+            "default 1.0.")
+
+
+def _capped_ids(ids: List[int]) -> str:
+    """'1, 2, 3' with the K-32 10-id cap: '..., ... (N sections)'."""
+    ids = sorted(ids)
+    shown = ", ".join(str(i) for i in ids[:10])
+    if len(ids) > 10:
+        shown += f", ... ({len(ids)} sections)"
+    return shown
+
+
+def _warn_nip1_one_point(state: ConversionState, one_point: FrozenSet[int],
+                         kept: Dict[int, str]) -> None:
+    """R14 round 10, A2: name the NIP-1 sections written N 1 and those kept
+    at max(2, NIP) with the reason, once per deck (the per-section loop; the
+    hourglass split copies carry the same N). ``--no-nip1-one-point`` names
+    the sections the default would write N 1 as bending shells."""
+    if not state.options.nip1_one_point:
+        ids = sorted(_nip1_one_point_secids(state, force=True)[0])
+        if ids:
+            state.warn(
+                f"*SECTION_SHELL {_capped_ids(ids)}: NIP 1 (one "
+                "through-thickness point, no bending, Vol I R17 p.41-66) is "
+                "written /PROP/SHELL N 2 (--no-nip1-one-point), which the "
+                "starter runs as N 0 global integration on a LAW1 group "
+                "(cgrtails.F:780-791, c3grtails.F:710): a shell that BENDS "
+                "where LS-DYNA's does not.")
+        return
+    if one_point:
+        state.warn(
+            f"*SECTION_SHELL {_capped_ids(list(one_point))}: NIP 1 on a "
+            "section of triangles only -> /PROP/SHELL N 1, LS-DYNA's one "
+            "point with no bending (Vol I R17 p.41-66; its d3hsp echoes 1 "
+            "integration point): the engine integrates no moment and no "
+            "transverse shear at one point (mulawc.F90:760-765, "
+            "c3coef3.F:134-137), no starter switch acts on N 1 "
+            "(c3grtails.F:710) and the starter zeroes Ashear there "
+            "(hm_read_prop01.F:246-259). MEASURED on a /SH3N cantilever "
+            "coupon (the coupon's default bytes, nt 4): the NIP-1 strips hang "
+            "(tip -81.9 "
+            ".. -82.7 mm, the hold-window mean) where N 2 bends (-0.4761 mm, "
+            "Euler-Bernoulli 0.47619 mm); on "
+            "mat_spring.belted-dummy (the one R14 carrier) with the SHRF rule: "
+            "IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the LS "
+            "peak over its 500 LS times (110032 cycles, nt 4). "
+            "--no-nip1-one-point writes N 2, which the starter "
+            "runs as N 0 on LAW1: a shell that bends.")
+    quads = [s for s, why in kept.items() if why == "quads"]
+    if quads:
+        state.warn(
+            f"*SECTION_SHELL {_capped_ids(quads)}: NIP 1 (one point, no "
+            "bending, Vol I R17 p.41-66) on a section with quadrilaterals "
+            "keeps /PROP/SHELL N max(2, NIP) = 2 - a shell that BENDS where "
+            "LS-DYNA's does not (the starter runs N 2 as N 0 on LAW1, "
+            "cgrtails.F:780-791). N 1 on quads is not written: the one-point "
+            "quads of this OpenRadioss build diverged in the round-10 probes "
+            "(QBAT, Ishell 12, on a cantilever: ENERGY ERROR at cycles 81-88 "
+            "at the default step, stable at half of it; QEPH, Ishell 24, on "
+            "an elastic airbag at the full and the half step).")
+    ini = [s for s, why in kept.items() if why == "initial state"]
+    if ini:
+        state.warn(
+            f"*SECTION_SHELL {_capped_ids(ini)}: NIP 1 keeps /PROP/SHELL N "
+            "max(2, NIP) = 2 because an *INITIAL_STRESS_SHELL / "
+            "*INITIAL_STRAIN_SHELL record names the section: writer/inistate "
+            "writes the /INISHE stations for that N, and a record whose "
+            "NTHICK is not that N (an NTHICK 1 record) is skipped by name - "
+            "on such a record neither LS-DYNA's one point nor the initial "
+            "state survives (keeping N 1 where every record states NTHICK 1 "
+            "is a ROADMAP item).")
 
 
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
@@ -5450,6 +5885,9 @@ def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
             f"/PROP/TYPE9/{prop_id}: shell thickness is {sec.t1:g} (<=0), which "
             "the starter rejects (THICK must be > 0). Set the *SECTION_SHELL "
             "thickness for the LAW128 shell part.")
+    # the Ashear cell below stays 0 = the starter's 5/6 (hm_read_prop09.F:
+    # 266): recorded for the per-deck SHRF route sentence (verification round)
+    _note_shrf_route_section(state, sec, "/PROP/TYPE9")
     vx, vy, vz = refvec
     b20 = " " * 20
     return [
@@ -5692,6 +6130,9 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
     emitted: Set[int] = set()
     # K-31: a split copy of an all-LAW1 section keeps the section's N = 0
     global_n = _law1_global_n_secids(state)
+    # R14 round 10, A2: ... and an A2 section's N 1 (named by the
+    # per-section loop)
+    one_point, _kept = _nip1_one_point_secids(state)
     for pid, prop_id in sorted(state.hourglass_prop_ids.items()):
         if prop_id in emitted:
             continue
@@ -5762,10 +6203,13 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                                         state.options.shell_default_ishell) if sec
                       else _elform_to_ishell(2, state.is_implicit,
                                              state.options.shell_default_ishell))
-            nip = _shell_prop_n(sec, global_n) if sec else 2
+            nip = _shell_prop_n(sec, global_n, one_point) if sec else 2
             thick = sec.t1 if sec else 0.0
+            # R14 round 10, A1: the split copy carries its section's Ashear
+            # (the section itself is named by the per-section loop)
             lines += _emit_prop_shell(prop_id, title, ishell, nip, istrain,
-                                      thick, hcoef=coeff)
+                                      thick, hcoef=coeff,
+                                      ashear=_shrf_ashear(state, sec))
     return lines
 
 
@@ -6202,7 +6646,13 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # matters to _resolve_ale_submaterials, which drops law 0 from the
     # /MAT/LAW51 phase list (fill_buffer_51.F:210 does not accept it, and
     # Radioss's void is the undeclared balance of the volume fractions).
+    # R14 round 10, A7 1a: on an AMMG deck whose one fluid partner is a LAW6
+    # carrier the vacuum MID is written as a LAW6 light-fluid copy
+    # (materials._resolve_vacuum_light_fluid: a decision only, memoised).
     if mid in state.mat_vacuum:
+        from .materials import _vacuum_is_light_fluid
+        if _vacuum_is_light_fluid(state, mid):
+            return 6                               # light-fluid /MAT/HYD_VISC
         return 0                                   # *MAT_140 -> /MAT/VOID
     # A refused *MAT_ACOUSTIC written as /MAT/VOID on a modal deck (round 9,
     # A7). The RESOLVED registry: a time-domain deck's refusal stays None.

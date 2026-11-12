@@ -1199,11 +1199,19 @@ class SectionShell:
                           Optional[float]]] = None
     # *SECTION_SHELL card 1 field 3 (cols 21-30) SHRF, the transverse shear
     # correction factor, as STATED: a BLANK field is 0.0 = "not given"
-    # (LS-DYNA's own default is 1.0) - the convention SectionTshell and
-    # *PART_COMPOSITE use. NOT converted: /PROP/SHELL Ashear stays 0, which
-    # the starter turns into 5/6 (hm_read_prop01.F:244); carrying SHRF to
-    # Ashear is a ROADMAP round-10 item.
+    # (LS-DYNA's own default is 1.0, Vol I R17 p.41-63) - the convention
+    # SectionTshell and *PART_COMPOSITE use. R14 round 10, A1 (default ON,
+    # --no-shrf-ashear): written to the /PROP/SHELL Ashear cell by the rule
+    # writer/mesh._shrf_rule (blank / 0 -> 1.0; within 0.005 of 5/6 the cell
+    # 0, the starter's own 5/6, hm_read_prop01.F:244; 0 on NIP-1, membrane
+    # and 2-D sections).
     shrf: float = 0.0
+    # R14 round 10, A1: True only for a section read from a *SECTION_SHELL
+    # card (handlers.handle_section_shell). k2rad's own placeholders -
+    # AutoPropShell_<id> (writer/mesh._auto_section_shell),
+    # PART_COMPOSITE_FALLBACK_<id> (writer/composites), the /PROP/TYPE9
+    # fallback (writer/mesh, LAW128) - have no deck SHRF and keep Ashear 0.
+    card_given: bool = False
 
 
 #: *SECTION_SHELL ELFORMs whose Card-2 thickness LS-DYNA ignores (Vol I R17
@@ -2786,6 +2794,33 @@ class ConstrainedLagrangeInSolid:
     pfac: float = 0.1
     start: float = 0.0
     end: float = 0.0
+    #: R14 round 10, A10 (D-11): the card-2 PFAC cell AS STATED - ``pfac``
+    #: folds every value <= 0 to 0.1 for its older readers, while LS-DYNA
+    #: reads 0 as the default 0.1 and a negative value as a LOAD CURVE id
+    #: (Vol I R17 p.10-117); read by the opt-in ``--clis-pfac-stiffness``
+    #: and the CLIS inventory sentence only
+    pfac_stated: float = 0.0
+
+
+@dataclass
+class VoidCopyPlan:
+    """The ONE decision of the ``*INITIAL_VOID`` void copy (R14 round 10, A10
+    2b) for one void part *pid* in the master (fluid) set of an emitted
+    ``*CONSTRAINED_LAGRANGE_IN_SOLID`` coupling, made by
+    ``writer/blast_ale._resolve_initial_void_copy``: ``record`` the
+    ``(sid, is_set)`` of the ``*INITIAL_VOID`` card that names it,
+    ``cls_idx`` the CLIS cards whose master set holds it, ``refusal`` the
+    clause that keeps the void at full density ("" = the copy is written),
+    ``copy_mid`` the MID its ``/PART`` is written with (its own MID when no
+    other part shares the ``*MAT_NULL``) and ``rho`` / ``ro`` the copy's
+    RHO_I and the fluid RO (its ``/EOS`` RHO_0)."""
+    pid: int
+    record: Tuple[int, bool] = (0, False)
+    cls_idx: List[int] = field(default_factory=list)
+    refusal: str = ""
+    copy_mid: int = 0
+    rho: float = 0.0
+    ro: float = 0.0
 
 
 @dataclass
@@ -2849,6 +2884,10 @@ class AleFlowTrackingPlan:
     idef: int = -1
     irot: int = 1
     reasons: List[str] = field(default_factory=list)
+    #: R14 round 10, A10 (D-6): the package condition that kept a card the
+    #: B8 screen accepted out ("" = none) - since the default flip the card
+    #: is written only inside the package
+    package: str = ""
 
 
 @dataclass
@@ -3937,6 +3976,10 @@ class ContactAutoSurf2Surf:
     shledg: int = 0
     srnde: int = 0
     icor: int = 0
+    #: Card 3 field 2 SFM (the SURFB / main side's penalty scale, 0 / blank =
+    #: 1.0; Vol I R17 p.11-33): read since R14 round 10 for the rigid-tool
+    #: penalty cap (writer/contacts._rigid_tool_cap, A8) - no other reader.
+    sfm: float = 0.0
 
 
 @dataclass
@@ -4100,6 +4143,11 @@ class ContactTiebreak:
     fd: float = 0.0
     sst: float = 0.0        # Card3 SAST (negative = absolute tie distance)
     mst: float = 0.0        # Card3 SBST (negative = absolute tie distance)
+    # Card3 SFSA / SFSB (0.0 = blank = 1.0): the penalty scale of the
+    # post-failure contact (round 10, B3: the companion /INTER/TYPE25 Stfac
+    # = min(SFS, SFM), dyna2rad's rule, convertcontacts.cxx:444-449)
+    sfs: float = 0.0
+    sfm: float = 0.0
     # ── keyword suffixes with no OpenRadioss counterpart ──────────────────
     mortar: bool = False
     user: bool = False
@@ -6179,6 +6227,11 @@ class ControlContact:
     shlthk: int         # shell thickness consideration
     penopt: int         # penalty option
     thkchk: int         # thickness change check
+    # Card 6 field 1 (optional card; blank / absent = 0): the SOFT 2 shell
+    # edge shape, Vol I R17 p.12-79 - the default of a *CONTACT Card D
+    # SHLEDG 0 (p.11-111). Round 10, B7: SRNDE is ignored unless SHLEDG is
+    # 0 on both cards (p.11-117).
+    shledg: int = 0
 
 
 @dataclass
@@ -6324,9 +6377,10 @@ class SolidHourglassScreens:
     is consulted once per part in the ``_assign_hourglass_props`` prepass and
     once per preloaded element in the /PRELOAD writer.
     """
-    #: False when the deck carries a ``*INITIAL_STRESS_SECTION``: /PRELOAD
-    #: Itype=2 measured ZERO OR NEGATIVE VOLUME at cycle 0 on Isolid 1 and 2
-    #: (``writer/preload._PRELOAD_STABLE_ISOLID``), so a bolted deck keeps its
+    #: False when the deck carries a ``*INITIAL_STRESS_SECTION``: under
+    #: /PRELOAD Itype=2 Isolid 1 and 2 lose the cut element right after the
+    #: hold (ZERO OR NEGATIVE VOLUME, measured on a clamped bar;
+    #: ``writer/preload._PRELOAD_STABLE_ISOLID``), so a bolted deck keeps its
     #: ELFORM Isolid everywhere.
     deck_enabled: bool
     #: Section ids the synthesis skips outright — today the /MAT/LAW115
@@ -6540,14 +6594,20 @@ class ControlTimestep:
     # DT2MS: <0 = mass scaling to hold the explicit time step at |DT2MS|
     # (→ /DT/NODA/CST). 0 or >0 (init-only) = no mass scaling.
     dt2ms: float = 0.0
-    # TSLIMT (card field 3): the shell time-step floor. In LS-DYNA this is the
-    # step at which a shell is stiffness-reduced or, with ERODE=1, DELETED.
-    # Carried to /DT/<elem>/DEL Tmin.
+    # TSLIMT (card field 3): LS-DYNA's shell minimum time step ASSIGNMENT -
+    # the moduli (not the masses) of *MAT 3 / 18 / 19 / 24 shells are
+    # modified so the shell step does not fall below it (Vol I R17 p.12-584 /
+    # 12-585). No erosion floor; OpenRadioss has no modulus floor, so it is
+    # named, not converted (R14 round 10, A11; under --no-erode-tsmin-rule
+    # ERODE 1 + TSLIMT > 0 still writes /DT/<elem>/DEL Tmin = TSLIMT, the
+    # ed52c93 trigger).
     tslimt: float = 0.0
-    # ERODE (card field 6): 1 = delete elements whose step falls below the
-    # floor, rather than merely limiting it. This is the user's explicit
-    # consent to LOSE ELEMENTS, which is why k2rad emits no deletion floor
-    # without it (or without the explicit --dt-del opt-in).
+    # ERODE (card field 6): by digit, the classes LS-DYNA erodes when their
+    # step falls below tsmin = DTMIN x dtstart of *CONTROL_TERMINATION
+    # (p.12-586 / Remark 6 p.12-590; ones solids + thick shells + SPH, tens
+    # shells, hundreds beams). k2rad does not compute dtstart, so ERODE is
+    # named, not converted (A11); --dt-del, the user's own request, is the
+    # only route to a deletion floor.
     erode: int = 0
 
 
@@ -6998,6 +7058,22 @@ class MatVacuum:
     mid: int
     title: str = ""
     rho: float = 0.0
+
+
+@dataclass
+class VacuumLightFluidPlan:
+    """The ONE decision of the vacuum light fluid (R14 round 10, A7 1a) for
+    one ``*MAT_VACUUM`` MID whose part k2rad emits with Iale >= 1, made by
+    ``writer/materials._resolve_vacuum_light_fluid``: ``vparts`` the vacuum's
+    emitted ALE parts, ``partners`` the other materials of its
+    ``*ALE_MULTI-MATERIAL_GROUP``, ``fmid`` the one fluid partner (0 when
+    there is not exactly one) and ``refusal`` the clause that keeps the
+    ``/MAT/VOID`` ("" = the LAW6 light-fluid copy is written)."""
+    vmid: int
+    vparts: List[int] = field(default_factory=list)
+    partners: List[int] = field(default_factory=list)
+    fmid: int = 0
+    refusal: str = ""
 
 
 @dataclass
@@ -7690,30 +7766,39 @@ class ConvertOptions:
     The EXCEPTIONS default to ON: measured fixes, each with a ``--no-``
     opt-out that restores the earlier output on the decks it moves -
 
-    ``adaptive_spring_token``, ``axisymmetric_2d``, ``bcs_union``,
+    ``adaptive_spring_token``, ``ale_flow_tracking``, ``ale_inflow_ebcs``,
+    ``axisymmetric_2d``,
+    ``bcs_union``,
     ``bolt_rigid_contact``, ``constrained_global``, ``constrained_linear``,
     ``contact_birth_death``, ``corotational_orthotropic``,
     ``damping_curve_window``,
     ``default_hourglass``, ``deformable_to_rigid``, ``discrete_offset``,
+    ``dt2ms_tssfac_product``,
     ``elastic_fluid_cp_cutoff``, ``elform7_beam_thickness_section``,
-    ``fixed_curve_columns``, ``generalized_weld_butt``,
+    ``erode_tsmin_rule``, ``fixed_curve_columns``, ``generalized_weld_butt``,
     ``imflag0_eigen_explicit``, ``imflag_curve_restart``,
-    ``implicit_n2s_type7``, ``implicit_rigid_gravity_nodes``,
+    ``implicit_end_fixpoint``, ``implicit_n2s_type7``,
+    ``implicit_rigid_gravity_nodes``,
     ``implicit_smooth_curve_sampling``, ``implicit_tshell_solid``,
+    ``initial_void_copy``,
     ``initial_void_floor``, ``joint_screw_gjoint``, ``law106_shell_restate``,
     ``law1_shell_global_n``, ``load_curve_offscale_zero``, ``mat_null_pc_mu``,
-    ``maxint_stress_all``, ``modal_acoustic_void``, ``node_tc_rc_bcs``,
+    ``maxint_stress_all``, ``modal_acoustic_void``, ``nip1_one_point``,
+    ``node_tc_rc_bcs``,
     ``plane_strain_unit_thickness``, ``plane_stress_unit_thickness``,
     ``positive_dt2ms_mass_scaling``, ``prescribed_motion_sf_default``,
     ``rigid_cog_master``, ``rigid_element_mass_admas``,
     ``rigid_local_constraints``, ``rigid_local_shared_skew``,
     ``rigid_part_pid_precedence``, ``rigid_secondary_swap``,
-    ``rigid_shell_rotary_inertia``, ``section_nodal_thickness_mean``,
-    ``shell_offset_gapmin``, ``shell_to_solid_rbody``,
+    ``rigid_shell_rotary_inertia``, ``rigid_tool_penalty_cap``,
+    ``section_nodal_thickness_mean``,
+    ``shell_offset_gapmin``, ``shell_to_solid_rbody``, ``shrf_ashear``,
     ``single_surface_sst_gap``, ``soft2_iedge_gate``, ``spc_vector_frames``,
     ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
     ``spotweld_shear_yield``, ``spring_token_mass_compensation``,
-    ``srnde_ishape``, ``tet_isolid1``, ``tgmult_imptemp``, ``weld_exponents``,
+    ``srnde_ishape``, ``surfatyp_all_parts``, ``tet_isolid1``,
+    ``tgmult_imptemp``, ``tiebreak_companion_stfac``,
+    ``vacuum_light_fluid``, ``weld_exponents``,
     ``weld_trajectory_impflux``, ``zero_density_floor``, ``zero_t0_sentinel``,
     ``zero_tolerance_ectol``
 
@@ -8556,9 +8641,10 @@ class ConvertOptions:
     # 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, LS-DYNA's
     # nodout); IE END +582.00 -> +53.91 % with this rule alone (RMS 393.31 ->
     # 81.05 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 =
-    # nt 2, 39 -> 35 cycles); the shipped default with --implicit-n2s-type7
-    # -0.78 .. -28.12 %, RMS 7.21 .. 15.26 % (125 runs at nt 4 and nt 2,
-    # three branches). solidof (a deformable-part clash) is byte identical.
+    # nt 2, 39 -> 35 cycles); the pre-round-10 default with
+    # --implicit-n2s-type7 -0.78 .. -28.12 %, RMS 7.21 .. 15.26 % (125 runs
+    # at nt 4 and nt 2, three branches; the round-10 bytes -21.37 .. -21.41 %
+    # in 12 runs). solidof (a deformable-part clash) is byte identical.
     rigid_part_pid_precedence: bool = True
     # --no-implicit-n2s-type7: an implicit *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE
     # stays an /INTER/TYPE25 (the 386444e bytes).
@@ -8775,21 +8861,45 @@ class ConvertOptions:
     # punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> +23.42 %. Reach 2
     # deck keys on 2 emitted models.
     load_curve_offscale_zero: bool = True
-    # --ale-flow-tracking (OPT-IN, R14 triage round 9, B8): write
-    # *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 (the ALE grid moving with the
-    # material's mass-weighted mean velocity about its centre of mass) as
-    # /ALE/GRID/FLOW-TRACKING in _0000.rad, after /DEF_SOLID (I_def -1 for
-    # BCEXP 7, I_rot +1 / -1 for BCROT 0 / 7; alew7.F:186-227); any other
-    # reference-system card is refused by name and stays skipped. /BEGIN
-    # stays 2022: the starter prints WARNING 100211 and reads the card.
-    #
-    # OFF by default: the row becomes MIXED. MEASURED on ale/bird/bird-b/
-    # bird_B (nt 4, 600 LS times): END IE +1484.66 -> +17.00 %, IE RMS
-    # 1189.95 -> 27.74 % of the LS peak, the energy error's worst -20.4 ->
-    # -8.7 % - but the deck KE RMS 253.09 -> 749.89 % (END +25.88 ->
-    # +1542.16 %): the void is converted at full density (cycle-0 KE 101.5
-    # against LS-DYNA's 11.737). Reach 1 deck key on 1 emitted model.
-    ale_flow_tracking: bool = False
+    # --no-ale-flow-tracking (R14 round 10, A10 / D-6; round 9's B8 opt-in
+    # retired into it): the ALE PACKAGE, ON by default - on a deck with ONE
+    # accepted *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 card (the B8 screen:
+    # PRID 0, ICR 0, BCEXP 7, BCROT 0 / 7, a set naming every Iale part,
+    # BCTRAN held by the ALE nodes' own /BCS) AND an *INITIAL_VOID part in
+    # the fluid set of a CLIS coupling that the void copy writes AND the PFAC
+    # stiffness able to apply (PFAC >= 0, an estimate): /ALE/GRID/FLOW-
+    # TRACKING in _0000.rad after /DEF_SOLID (I_def -1, I_rot +1 / -1;
+    # alew7.F:186-227) + the void copy + Stfval = PFAC x m_node / dt0^2 on
+    # the fluid's TYPE18 (x 1e-3 on the void's). The card ALONE is no longer
+    # written (round 9 measured it MIXED: KE RMS 253.09 -> 749.89 %).
+    # MEASURED on bird_B (nt 4, 600 LS times, the findings' 6.3a gate arm
+    # reproduced to the digit): 2935 -> 2976 cycles, END IE +1484.66 ->
+    # +8.15 %, END KE +25.88 -> -14.44 %, RMS IE 1189.95 -> 6.71 %, KE
+    # 253.09 -> 3.37 %. Reach 1 deck key on 1 emitted model.
+    ale_flow_tracking: bool = True
+    # --no-initial-void-copy (R14 round 10, A10 2b, default ON;
+    # writer/blast_ale._resolve_initial_void_copy): an *INITIAL_VOID part in
+    # the fluid (master) set of a *CONSTRAINED_LAGRANGE_IN_SOLID coupling, on
+    # a deck with no *ALE_REFERENCE_SYSTEM card, is written as a LAW6 copy of
+    # its fluid at RHO_I = 1e-3 x RO (f = 1e-3 a numerical floor of this
+    # converter - LS-DYNA empties the part; *CONTROL_ALE VFACT is a stress
+    # cut-off, Vol I R17 p.12-52), its /EOS RHO_0 = RO, on its own
+    # /GRBRIC/PART + /INTER/TYPE18 at the fluid interface's Stfval x 1e-3.
+    # MEASURED on quadrature_B (nt 4, n 500): KE RMS 28.17 -> 10.42 %, the
+    # cost IE RMS 142.04 -> 161.11 %. Reach 2 deck keys on 1 emitted model
+    # (quadrature_B / _C); forging_B is refused (its fluid is not emitted).
+    initial_void_copy: bool = True
+    # --clis-pfac-stiffness (OPT-IN, R14 round 10, A10 2a): Stfval = PFAC x
+    # m_node / dt0^2 on every *CONSTRAINED_LAGRANGE_IN_SOLID /INTER/TYPE18
+    # (m_node = the median lumped nodal mass of the coupled fluid, dt0 = Tsca
+    # x the starter's smallest element step estimated from the deck,
+    # writer/blast_ale.clis_dt0_estimate: +0.11 / +0.09 / +1.77 % against the
+    # engine's cycle-0 step on bird_B / stagnation_A / quadrature_B). A load-
+    # curve PFAC (< 0) is refused. MEASURED (nt 4): stagnation_A with the
+    # vacuum light fluid and the inlet 86 % of LS-DYNA's inflow work by t
+    # 2.40e-4, IE RMS 206.79 -> 223.42 %; quadrature_B IE RMS 161.11 -> 492.61
+    # %: not a default.
+    clis_pfac_stiffness: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9006,7 +9116,10 @@ class ConvertOptions:
     # Implicit decks only (no effect on explicit output). NOTE: convert() is
     # the package's only ConvertOptions construction and always passes this
     # field, so the value here is a documentation default, not the live one -
-    # cli.py's --fixpoint-count default is what a CLI run reads.
+    # cli.py's --fixpoint-count default is what a CLI run reads. DEFAULT 0 =
+    # no grid; a dynamic implicit deck still gets ONE fix point at its end
+    # time unless --no-implicit-end-fixpoint (R14 round 10, A5:
+    # implicit_end_fixpoint below).
     fixpoint_count: int = 0
     # Modal (/EIG) emission for COMMERCIAL Altair Radioss (opt-in): the
     # open-source OpenRadioss engine ships the /EIG eigensolver only as a no-op
@@ -9138,8 +9251,10 @@ class ConvertOptions:
     # p.41-104 Remark 13), ELFORM 2/3/16 and the tets (no hourglass modes), ALE,
     # a *MAT_NULL fluid (kept VISCOUS, Isolid 1, p.25-3 Remark 4), /MAT/LAW115
     # sections (their own measured 17 → 24) and any deck carrying
-    # *INITIAL_STRESS_SECTION (Isolid 1/2 = zero-or-negative volume at cycle 0
-    # under /PRELOAD Itype=2).
+    # *INITIAL_STRESS_SECTION (under /PRELOAD Itype=2 Isolid 1/2 hold the
+    # preload during the hold and then
+    # lose the cut element to ZERO OR NEGATIVE VOLUME -
+    # writer/preload._PRELOAD_STABLE_ISOLID, round 10 B9).
     # Set False (--no-default-hourglass) to keep the pre-2026-09 behaviour, in
     # which a defaulted deck gets full integration and NO hourglass control.
     default_hourglass: bool = True
@@ -9399,10 +9514,12 @@ class ConvertOptions:
     # *CONTROL_TERMINATION ENDMAS as an engine /STOP whose Mmax is the RATIO
     # ENDMAS / 100 (ecrit.F:516/593 compare (M - M0) / M0 against it).
     stop_added_mass: bool = False
-    # --dt2ms-tssfac-product (opt-in; writer/assembly): /DT/NODA/CST (and
-    # /DT/AMS) Tmin = TSSFAC x |DT2MS|, LS-DYNA's minimum step for DT2MS < 0
-    # (Vol I R17 p.12-585), instead of |DT2MS|.
-    dt2ms_tssfac_product: bool = False
+    # --no-dt2ms-tssfac-product (R14 round 10, A4: default ON;
+    # writer/assembly): /DT/NODA/CST Tmin = TSSFAC x |DT2MS|, LS-DYNA's
+    # minimum step for DT2MS < 0 (Vol I R17 p.12-585), instead of |DT2MS|.
+    # /DT/AMS (--ams) keeps |DT2MS| on both arms, as dyna2rad writes it
+    # (convertcards.cxx:233-234): no AMS run measured the product.
+    dt2ms_tssfac_product: bool = True
     # --print-every N (writer/assembly): the engine /PRINT/-N cadence, N in
     # 1..9999 (the engine reads the cell as I5, freform.F:1563). None = the
     # writer's own rule.
@@ -9410,7 +9527,7 @@ class ConvertOptions:
     # --no-tet-isolid1 (default ON; writer/mesh): /PROP/SOLID Isolid 1 on a
     # section whose elements are ALL 4- / 10-node tets (not ALE, not
     # cohesive) instead of Isolid 14. The starter resets every tet group to
-    # Isolid 1 anyway, for every material (sgrtails.F:984-1000); on the way,
+    # Isolid 1 anyway, for every material (sgrtails.F:984-999); on the way,
     # Isolid 14 on a LAW1 section draws WARNING 791, the integration-point
     # message (sgrtails.F:695-704).
     tet_isolid1: bool = True
@@ -9437,7 +9554,8 @@ class ConvertOptions:
     # --no-single-surface-sst-gap (default ON; writer/contacts): Gapmin =
     # |SST| on a single-surface contact of shells on an Igap-0 route - two
     # shells each carrying the contact thickness SST meet at SST/2 + SST/2 -
-    # instead of (|SST| + |MST|)/2.
+    # instead of (|SST| + |MST|)/2 (a self-mirrored SOFT -7 card too since
+    # round 10: its Igap-2 TYPE7 gap is max(Gapmin, t)).
     single_surface_sst_gap: bool = True
 
     # ── The opt-out flags of the user's decision 8 (2026-11-01) for the
@@ -9467,6 +9585,122 @@ class ConvertOptions:
     # the engine deck (CardStack K-42, reached from a .k deck since wave C).
     # False = no such line whatever MAXINT says; the read stays.
     maxint_stress_all: bool = True
+
+    # ── R14 parity round 10 (the defaults and their opt-outs) ──────────────
+    # --no-shrf-ashear (A1, default ON; writer/mesh._shrf_rule, read at both
+    # /PROP/SHELL emission sites and by every SHRF sentence): the
+    # *SECTION_SHELL SHRF on the /PROP/SHELL Ashear cell - a blank / 0 as
+    # LS-DYNA's default 1.0 (Vol I R17 p.41-63), 0 < SHRF <= 1 as stated,
+    # within 0.005 of 5/6 the cell 0 (the starter's own 5/6,
+    # hm_read_prop01.F:244), outside (0, 1] 1.0 with a warning; the cell
+    # stays 0 on NIP-1, membrane ELFORM 5 / 9 and 2-D sections (LS-DYNA
+    # shears none of them; the starter zeroes Ashear under N 1 itself,
+    # hm_read_prop01.F:246-259) and on k2rad's own placeholder sections.
+    # MEASURED (R14 round 10): each Ashear reproduces its own Timoshenko
+    # closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on quads and
+    # -0.024 / -0.025 % on /SH3N triangles; 148 R14 keys / 132 models move
+    # by the Ashear cells only, the 14 match rows among them stay match.
+    # False = Ashear 0 everywhere (the ed52c93 bytes).
+    shrf_ashear: bool = True
+    # --no-nip1-one-point (A2, default ON; writer/mesh._nip1_one_point_secids,
+    # read at both /PROP/SHELL emission sites): /PROP/SHELL N 1 on a NIP-1
+    # *SECTION_SHELL (stated, or a one-point *INTEGRATION_SHELL) whose shell
+    # elements are all triangles - LS-DYNA's one point, no bending (Vol I R17
+    # p.41-66), which no starter switch touches (c3grtails.F:710); a NIP-1
+    # section with quadrilaterals or an initial-state record keeps
+    # max(2, NIP) = 2 and is named. MEASURED (R14 round 10, the shipped
+    # default bytes, nt 4): a /SH3N cantilever's NIP-1 strips hang (tip -81.9
+    # .. -82.7 mm) where N 2 bends (-0.4761 mm); mat_spring.belted-dummy (the
+    # one R14 carrier, 1 key / 1 model)
+    # with A1: IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the LS
+    # peak over its 500 LS times (nt 4). False = max(2, NIP) (ed52c93).
+    nip1_one_point: bool = True
+    # --no-implicit-end-fixpoint (A5, default ON; writer/assembly
+    # _implicit_end_fixpoint): one /IMPL/DT/FIXPOINT at the run's end time on
+    # a dynamic implicit deck (/IMPL/DYNA/2 with /IMPL/DT/2, not RIKS) when no
+    # --fixpoint-count grid is written - the bytes of --fixpoint-count 1. The
+    # engine does not clip a dynamic increment to the remaining time
+    # (imp_dt.F:53-56) and stops at the first cycle past the end
+    # (resol.F:8317-8318). MEASURED (R14 round 10, nt 4 = nt 2): the 9 keys /
+    # 5 models that ended NORMAL below ENDTIM reach it at +1 cycle with
+    # fifths 1-4 unchanged; END moves both ways (ex_14_solid_elform_1 IE END
+    # -14.44 % at t 0.01839 -> -33.66 % at t 0.02); a sliver remainder makes
+    # the last row an artifact (metal-cutting, ratio 0.05: KE 52.3 .. 111.0
+    # -> 3.57e8 .. 6.06e8 over four runs at nt 4). 21 keys /
+    # 16 models move by the two lines. False = no card (ed52c93).
+    implicit_end_fixpoint: bool = True
+    # --implicit-rayleigh-damping (A6, OPT-IN; writer/assembly
+    # _implicit_damping): /IMPL/DYNA/DAMP alpha = VALDMP x ST, beta 0 after
+    # /IMPL/DYNA/2 for a *DAMPING_GLOBAL LCID 0 with uniform STX..SRZ on a
+    # dynamic implicit deck (imp_dyna.F:1810-1828: alpha x M x V), beside the
+    # starter /DAMP, which an implicit run never applies (resol.F:6406 /
+    # :6547 skip CALL DAMPING; the inertness is named by default). OFF by
+    # default: MEASURED (R14 round 10, nt 4 = nt 2) on the shipped adaptive
+    # step with the end fix point it worsens ex_14_solid_elform_1, IE RMS 4.51
+    # -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS peak over its 200 LS times.
+    implicit_rayleigh_damping: bool = False
+    # --no-erode-tsmin-rule (A11, default ON; writer/assembly
+    # _make_engine_dt_deletion / _note_erode_tslimt): *CONTROL_TIMESTEP
+    # ERODE 1 + TSLIMT > 0 writes no /DT/{SHELL,SH_3N,BRICK}/DEL - TSLIMT is
+    # LS-DYNA's shell MODULUS floor (Vol I R17 p.12-584 / 12-585), its erosion
+    # floor is tsmin = DTMIN x dtstart (p.12-558), not converted; both named in
+    # one recognized-not-emitted record. MEASURED (R14 round 10): on a 10-brick
+    # column (ERODE 1, TSLIMT 1e-7) the ed52c93 cards deleted 10 of 10 bricks
+    # at t 2.988e-4 where LS-DYNA's closed form deletes none; 0 R14 decks state
+    # TSLIMT != 0. False = the ed52c93 trigger (Tmin = TSLIMT).
+    erode_tsmin_rule: bool = True
+    # --no-vacuum-light-fluid (R14 round 10, A7 1a, default ON;
+    # writer/materials._resolve_vacuum_light_fluid): a *MAT_VACUUM part k2rad
+    # emits with Iale >= 1 whose *ALE_MULTI-MATERIAL_GROUP holds exactly one
+    # other material, a *MAT_NULL + *EOS_* fluid written as /MAT/HYD_VISC, is
+    # written as a LAW6 light-fluid copy of that fluid under the vacuum's own
+    # MID (RHO_I = the vacuum RO, the /EOS RHO_0 = the fluid RO, Pmin -1e-20
+    # where the fluid's is 0) instead of /MAT/VOID, which DELETES the fluid
+    # that advects into it. MEASURED (nt 4): stagnation_A / _B died at cycle
+    # 832 (NEGATIVE RHO, t 0.00181 of 0.02) and run NORMAL to t 0.02 in 9364
+    # cycles with the ALE inlet (A7 1b). A LAW44 or LAW0 partner, two
+    # partners, RO <= 0 or an /EOS id clash keep /MAT/VOID, named. 2 keys / 2
+    # models. False = /MAT/VOID (the round-10 A-i bytes).
+    vacuum_light_fluid: bool = True
+    # --no-ale-inflow-ebcs (R14 round 10, A7 1b, default ON;
+    # writer/loads._make_imposed_motions_set + writer/blast_ale
+    # _ale_inlet_faces): a VAD-0 *BOUNDARY_PRESCRIBED_MOTION_SET / _NODE row
+    # on a global X / Y / Z translation whose nodes cover boundary faces of an
+    # EMITTED Iale (ELFORM 11 / 12) brick -> /SURF/SEG of those faces +
+    # /EBCS/INLET/VP with the row's velocity, in place of the /IMPVEL of the
+    # covered nodes: an /IMPVEL on an Eulerian ALE boundary admits no material
+    # (aflux3.F:488-524). MEASURED on stagnation_A with the light fluid (nt
+    # 4, n 500 LS times): KE RMS 53.09 -> 14.40 %, the named cost IE RMS
+    # 172.71 -> 206.79 %. Refused by name beside a LAW0 vacuum, for a skew,
+    # a time window, a non-/FUNCT curve or an unheld face node; ELFORM 5 / 6
+    # (Iale 0 in k2rad) never reached. 2 keys / 2 models. False = the
+    # /IMPVEL.
+    ale_inflow_ebcs: bool = True
+    # --no-rigid-tool-penalty-cap (R14 round 10, A8, default ON;
+    # writer/contacts._rigid_tool_cap): on the /INTER/TYPE7 of a
+    # non-automatic *CONTACT_ONE_WAY_SURFACE_TO_SURFACE /
+    # *CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE (+ _MPP) whose main side is
+    # all rigid and whose two sides are shells, SOFT 0, PENOPT 0 / 1: Stmax =
+    # 2 x LS-DYNA Theory eq. 30.8 x SLSFAC x SF (the 2 undoes the 1/2 an
+    # Istf-4 TYPE7 applies per node, i7for3.F:976) and Stmin = min(1000,
+    # Stmax). Every other class is named. 4 keys / 4 models, 12 cells.
+    # MEASURED figures: _A8_MEASURED in writer/contacts. False = Stmax 0.
+    rigid_tool_penalty_cap: bool = True
+
+    # ── Round 10, part B (the CardStack batch's contact leftovers) ─────────
+    # --no-surfatyp-all-parts (default ON; writer/common.single_surface_scope
+    # and writer/contacts): a single-surface *CONTACT with a stated SSID and
+    # SURFATYP 5 takes the SSID = 0 all-parts route on both routes, one with
+    # SURFATYP 6 the explicit all-parts /INTER/TYPE25 minus the exempted
+    # *SET_PART (Vol I R17 p.11-25). False = both dropped by name, as the
+    # cards were before round 10.
+    surfatyp_all_parts: bool = True
+    # --no-tiebreak-companion-stfac (default ON; writer/contacts): the
+    # post-rupture companion /INTER/TYPE25 of a *CONTACT_..._TIEBREAK takes
+    # --soften-stfac when given, else the card's Card-3 min(SFS, SFM) (blank
+    # or 0 = 1.0, written 0 at 1.0). False = Stfac 0 (the starter's 1.0)
+    # whatever the card or the flag says, the cell before round 10.
+    tiebreak_companion_stfac: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.
@@ -10549,6 +10783,42 @@ class ConversionState:
     # writer/blast_ale._resolve_ale_flow_tracking's memo (None = not yet
     # resolved).
     ale_flow_tracking_plan: Optional[AleFlowTrackingPlan] = None
+    # R14 round 10, A7 1a: writer/materials._resolve_vacuum_light_fluid's
+    # memo (None = not yet resolved; else vacuum MID -> its plan, one entry
+    # per *MAT_VACUUM on an emitted Iale part, {} when the option is off).
+    # The materials section, the LAW51 phase screen and the A7 1b inlet
+    # refusal all read this ONE record.
+    vacuum_light_fluid_plan: Optional[Dict[int, VacuumLightFluidPlan]] = None
+    # R14 round 10, A9: the *CONTROL_CONTACT SLSFAC sentence was written
+    # (writer/contacts._warn_slsfac_dropped runs at both exits of
+    # _make_interfaces, which a deferred implicit stub calls a second time).
+    slsfac_named: bool = False
+    # R14 round 10, fix round: the blank-TSSFAC sentence of a deck whose
+    # LS-DYNA default (Vol I R17 p.12-589 Remark 1 a / b) is not 0.9 was
+    # written (writer/assembly._warn_ls_default_tssfac; once per deck, an
+    # --imflag-curve-restart chain builds several engine files).
+    ls_tssfac_named: bool = False
+    # R14 round 10, verification round (findings 6.32 (2)(f)): the shell
+    # properties the SHRF rule (A1, /PROP/SHELL only) does not reach -
+    # (label, id, property kind, the deck's SHRF, LS-DYNA's factor) recorded
+    # by their emitters, named once per deck by writer/mesh
+    # ._warn_shrf_other_routes. Text only.
+    shrf_other_routes: List[Tuple[str, int, str, float, float]] = field(
+        default_factory=list)
+    # R14 round 10, A8: the Stmin cell each /INTER/TYPE7 was WRITTEN with
+    # (writer/contacts._emit_inter_type7), so the K-02 floor sentence reads
+    # the card's own value and never claims 1000 where the rigid-tool cap
+    # wrote less.
+    type7_written_stmin: Dict[int, float] = field(default_factory=dict)
+    # R14 round 10, A10 2b: writer/blast_ale._resolve_initial_void_copy's
+    # memo (None = not yet resolved; else void pid -> its plan, refused ones
+    # included; {} when nothing qualifies). The copy writes its cells through
+    # the round-8 B10 maps below (sis_density / sis_copy_mids /
+    # sis_part_mids); _make_fsi_coupling reads this record for the split.
+    initial_void_copy_plan: Optional[Dict[int, VoidCopyPlan]] = None
+    # R14 round 10, A10: writer/blast_ale.clis_dt0_estimate's memo - (dt0,
+    # family, element step, Tsca) or (None, the refusal, 0, 0)
+    clis_dt0_memo: Optional[Tuple[Optional[float], str, float, float]] = None
     # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.
@@ -11258,6 +11528,11 @@ class ConversionState:
     damping_global: Optional[DampingGlobal] = None
     damping_part_stiffness: List[DampingPartStiffness] = field(default_factory=list)
     damping_part_mass: List[DampingPartMass] = field(default_factory=list)
+    #: R14 round 10, A6: the /DAMP (and /DAMP/FUNCT) header lines the
+    #: starter carries, registered after the damping sections
+    #: (writer/assembly build_starter) and read by the implicit engine
+    #: writer, which names them inert on an implicit run.
+    damp_cards: List[str] = field(default_factory=list)
     damping_frequency_range: List[DampingFrequencyRange] = field(default_factory=list)
     damping_relative: List[DampingRelative] = field(default_factory=list)
 

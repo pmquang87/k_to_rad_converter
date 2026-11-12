@@ -181,7 +181,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          positive_dt2ms_mass_scaling: bool = True,
                          plane_stress_unit_thickness: bool = True,
                          load_curve_offscale_zero: bool = True,
-                         ale_flow_tracking: bool = False,
+                         ale_flow_tracking: bool = True,
                          weld_trajectory_window_text: str = "",
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
@@ -205,7 +205,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          airbag_particle_uniform: bool = False,
                          damping_curve_window: bool = True,
                          stop_added_mass: bool = False,
-                         dt2ms_tssfac_product: bool = False,
+                         dt2ms_tssfac_product: bool = True,
                          print_every_text: str = "",
                          tet_isolid1: bool = True,
                          law1_shell_global_n: bool = True,
@@ -217,7 +217,19 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          contact_birth_death: bool = True,
                          soft2_iedge_gate: bool = True,
                          srnde_ishape: bool = True,
-                         maxint_stress_all: bool = True) -> dict:
+                         maxint_stress_all: bool = True,
+                         shrf_ashear: bool = True,
+                         nip1_one_point: bool = True,
+                         implicit_end_fixpoint: bool = True,
+                         implicit_rayleigh_damping: bool = False,
+                         erode_tsmin_rule: bool = True,
+                         vacuum_light_fluid: bool = True,
+                         ale_inflow_ebcs: bool = True,
+                         rigid_tool_penalty_cap: bool = True,
+                         initial_void_copy: bool = True,
+                         clis_pfac_stiffness: bool = False,
+                         surfatyp_all_parts: bool = True,
+                         tiebreak_companion_stfac: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -552,6 +564,20 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["soft2_iedge_gate"] = bool(soft2_iedge_gate)
     kwargs["srnde_ishape"] = bool(srnde_ishape)
     kwargs["maxint_stress_all"] = bool(maxint_stress_all)
+    # R14 parity round 10 (the CLI flags of the same names)
+    kwargs["shrf_ashear"] = bool(shrf_ashear)
+    kwargs["nip1_one_point"] = bool(nip1_one_point)
+    kwargs["implicit_end_fixpoint"] = bool(implicit_end_fixpoint)
+    kwargs["implicit_rayleigh_damping"] = bool(implicit_rayleigh_damping)
+    kwargs["erode_tsmin_rule"] = bool(erode_tsmin_rule)
+    kwargs["vacuum_light_fluid"] = bool(vacuum_light_fluid)
+    kwargs["ale_inflow_ebcs"] = bool(ale_inflow_ebcs)
+    kwargs["rigid_tool_penalty_cap"] = bool(rigid_tool_penalty_cap)
+    kwargs["initial_void_copy"] = bool(initial_void_copy)
+    kwargs["clis_pfac_stiffness"] = bool(clis_pfac_stiffness)
+    # round 10, part B
+    kwargs["surfatyp_all_parts"] = bool(surfatyp_all_parts)
+    kwargs["tiebreak_companion_stfac"] = bool(tiebreak_companion_stfac)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -656,7 +682,7 @@ class ConverterGUI:
         self.positive_dt2ms_mass_scaling = tk.BooleanVar(value=True)
         self.plane_stress_unit_thickness = tk.BooleanVar(value=True)
         self.load_curve_offscale_zero = tk.BooleanVar(value=True)
-        self.ale_flow_tracking = tk.BooleanVar(value=False)
+        self.ale_flow_tracking = tk.BooleanVar(value=True)
         self.weld_trajectory_window = tk.StringVar(value="")
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
@@ -677,7 +703,7 @@ class ConverterGUI:
         # The CardStack-pipeline levers
         self.damping_curve_window = tk.BooleanVar(value=True)
         self.stop_added_mass = tk.BooleanVar(value=False)
-        self.dt2ms_tssfac_product = tk.BooleanVar(value=False)
+        self.dt2ms_tssfac_product = tk.BooleanVar(value=True)
         self.print_every = tk.StringVar(value="")
         self.tet_isolid1 = tk.BooleanVar(value=True)
         self.law1_shell_global_n = tk.BooleanVar(value=True)
@@ -689,6 +715,20 @@ class ConverterGUI:
         self.soft2_iedge_gate = tk.BooleanVar(value=True)
         self.srnde_ishape = tk.BooleanVar(value=True)
         self.maxint_stress_all = tk.BooleanVar(value=True)
+        # R14 parity round 10
+        self.shrf_ashear = tk.BooleanVar(value=True)
+        self.nip1_one_point = tk.BooleanVar(value=True)
+        self.implicit_end_fixpoint = tk.BooleanVar(value=True)
+        self.implicit_rayleigh_damping = tk.BooleanVar(value=False)
+        self.erode_tsmin_rule = tk.BooleanVar(value=True)
+        self.vacuum_light_fluid = tk.BooleanVar(value=True)
+        self.ale_inflow_ebcs = tk.BooleanVar(value=True)
+        self.rigid_tool_penalty_cap = tk.BooleanVar(value=True)
+        self.initial_void_copy = tk.BooleanVar(value=True)
+        self.clis_pfac_stiffness = tk.BooleanVar(value=False)
+        # round 10, part B
+        self.surfatyp_all_parts = tk.BooleanVar(value=True)
+        self.tiebreak_companion_stfac = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1370,9 +1410,8 @@ class ConverterGUI:
                 row=77, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            io, text="ALE reference system PRTYPE 4 -> /ALE/GRID/FLOW-TRACKING "
-                     "(opt-in) - OFF. bird_B: IE END +1485 -> +17 %, KE RMS "
-                     "worse",
+            io, text="ALE package: FLOW-TRACKING + void copy + PFAC stiffness "
+                     "- ON. bird_B IE END +1484.66 -> +8.15 %",
             variable=self.ale_flow_tracking).grid(
                 row=78, column=0, columnspan=3, sticky="w", **pad)
 
@@ -1389,8 +1428,9 @@ class ConverterGUI:
             variable=self.stop_added_mass).grid(
                 row=80, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(
-            io, text="Opt-in: mass-scaled Tmin = TSSFAC x |DT2MS| (LS-DYNA's "
-                     "minimum step) instead of |DT2MS| - OFF",
+            io, text="DT2MS < 0: /DT/NODA/CST Tmin = TSSFAC x |DT2MS| "
+                     "(LS-DYNA's minimum step; mass-scaled Tmin = TSSFAC x "
+                     "|DT2MS|), /DT/AMS keeps |DT2MS| - ON",
             variable=self.dt2ms_tssfac_product).grid(
                 row=81, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(
@@ -1445,6 +1485,72 @@ class ConverterGUI:
                      "deck - ON",
             variable=self.maxint_stress_all).grid(
                 row=91, column=0, columnspan=3, sticky="w", **pad)
+        # The R14 parity round-10 levers (rows 92-...)
+        ttk.Checkbutton(
+            io, text="*SECTION_SHELL SHRF -> /PROP/SHELL Ashear (blank = "
+                     "LS-DYNA's 1.0; NIP 1 / membrane / 2-D sections keep "
+                     "5/6) - ON",
+            variable=self.shrf_ashear).grid(
+                row=92, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="NIP 1 on a triangle-only section -> /PROP/SHELL N 1 "
+                     "(one point, no bending) - ON",
+            variable=self.nip1_one_point).grid(
+                row=93, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Dynamic implicit: /IMPL/DT/FIXPOINT at the end time "
+                     "(the run reaches ENDTIM) - ON",
+            variable=self.implicit_end_fixpoint).grid(
+                row=94, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Opt-in: dynamic implicit *DAMPING_GLOBAL -> "
+                     "/IMPL/DYNA/DAMP (the starter /DAMP is inert in "
+                     "implicit) - OFF",
+            variable=self.implicit_rayleigh_damping).grid(
+                row=95, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="ERODE 1 + TSLIMT > 0 is no deletion floor (TSLIMT is "
+                     "LS-DYNA's shell modulus floor) - ON",
+            variable=self.erode_tsmin_rule).grid(
+                row=96, column=0, columnspan=3, sticky="w", **pad)
+        # part A-ii (rows 97-...)
+        ttk.Checkbutton(
+            io, text="*MAT_VACUUM in an AMMG: a LAW6 light fluid, not "
+                     "/MAT/VOID - ON. stagnation 832 cycles -> NORMAL",
+            variable=self.vacuum_light_fluid).grid(
+                row=97, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="ALE inflow: /EBCS/INLET/VP, not /IMPVEL - ON. "
+                     "stagnation KE RMS 53.09 -> 14.40 %; no outflow: fluid "
+                     "mass +71.65 % at the end",
+            variable=self.ale_inflow_ebcs).grid(
+                row=98, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Rigid-tool ONE_WAY / FORMING contacts: Stmax = 2 x LS "
+                     "eq. 30.8 penalty - ON",
+            variable=self.rigid_tool_penalty_cap).grid(
+                row=99, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="*INITIAL_VOID on a CLIS deck: a LAW6 void copy at "
+                     "1e-3 x RO - ON. quadrature KE RMS 28.17 -> 10.42 %",
+            variable=self.initial_void_copy).grid(
+                row=100, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="CLIS stiffness PFAC x m / dt0^2 - OFF (opt-in). "
+                     "quadrature IE RMS 161.11 -> 492.61 %",
+            variable=self.clis_pfac_stiffness).grid(
+                row=101, column=0, columnspan=3, sticky="w", **pad)
+        # round 10, part B
+        ttk.Checkbutton(
+            io, text="Single-surface SURFATYP 5 / 6 with an SSID -> the "
+                     "all-parts self-contact (6: explicit, minus the set) - ON",
+            variable=self.surfatyp_all_parts).grid(
+                row=102, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Tiebreak post-rupture companion TYPE25 takes Soften "
+                     "Stfac / the card's min(SFS, SFM) - ON",
+            variable=self.tiebreak_companion_stfac).grid(
+                row=103, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1492,9 +1598,11 @@ class ConverterGUI:
             text="Emits /DT/{SHELL,SH_3N,BRICK}/DEL — OpenRadioss DELETES any "
                  "element whose time step reaches Tmin, removing mass and "
                  "stiffness the LS-DYNA original may have kept. Leave blank "
-                 "unless a run is stalling on one degrading element; a deck "
-                 "that asks for deletion itself (*CONTROL_TIMESTEP ERODE=1 "
-                 "with TSLIMT>0) is converted without this. Choose it as a "
+                 "unless a run is stalling on one degrading element; since "
+                 "R14 round 10 nothing else writes a deletion floor "
+                 "(*CONTROL_TIMESTEP TSLIMT is LS-DYNA's shell modulus "
+                 "floor, and its ERODE floor DTMIN x dtstart is not "
+                 "converted - both named in the log). Choose it as a "
                  "DELETION threshold, not a mass-scaling target: ~0.9x the "
                  "initial step deletes elements that merely stretched ~10%, "
                  "~0.4-0.5x reserves it for near-total element collapse."
@@ -1576,8 +1684,9 @@ class ConverterGUI:
         ttk.Label(fc, text="Soften Stfac:").grid(row=3, column=0, sticky="w", **pad)
         ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=3, column=1, sticky="w", **pad)
         ttk.Label(fc, text="penalty stiffness scale on every /INTER/TYPE7 (the SSID != 0 single-surface route "
-                           "included), TYPE25 (not a tiebreak's post-rupture companion) and SOFT TYPE11 / 19, "
-                           "e.g. 0.3 — blank = the per-contact Card-3 SFS mapping (overridden by this field)",
+                           "included), TYPE25 (a tiebreak's post-rupture companion too, unless the 'Tiebreak "
+                           "post-rupture companion' option is off) and SOFT TYPE11 / 19, e.g. 0.3 — blank = "
+                           "the per-contact Card-3 SFS mapping (overridden by this field)",
                   foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
         ttk.Label(fc, text="Tie STFAC:").grid(row=5, column=0, sticky="w", **pad)
@@ -1783,6 +1892,18 @@ class ConverterGUI:
                 soft2_iedge_gate=self.soft2_iedge_gate.get(),
                 srnde_ishape=self.srnde_ishape.get(),
                 maxint_stress_all=self.maxint_stress_all.get(),
+                shrf_ashear=self.shrf_ashear.get(),
+                nip1_one_point=self.nip1_one_point.get(),
+                implicit_end_fixpoint=self.implicit_end_fixpoint.get(),
+                implicit_rayleigh_damping=self.implicit_rayleigh_damping.get(),
+                erode_tsmin_rule=self.erode_tsmin_rule.get(),
+                vacuum_light_fluid=self.vacuum_light_fluid.get(),
+                ale_inflow_ebcs=self.ale_inflow_ebcs.get(),
+                rigid_tool_penalty_cap=self.rigid_tool_penalty_cap.get(),
+                initial_void_copy=self.initial_void_copy.get(),
+                clis_pfac_stiffness=self.clis_pfac_stiffness.get(),
+                surfatyp_all_parts=self.surfatyp_all_parts.get(),
+                tiebreak_companion_stfac=self.tiebreak_companion_stfac.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2044,9 +2165,9 @@ class ConverterGUI:
             bits.append("an ELFORM 12 section stating no thickness kept at Thick 0 (--no-plane-stress-unit-thickness)")
         if not kwargs.get("load_curve_offscale_zero", True):
             bits.append("applied-load curves extrapolated off scale (--no-load-curve-offscale-zero)")
-        if kwargs.get("ale_flow_tracking"):
-            bits.append("ALE reference system PRTYPE 4 -> "
-                        "/ALE/GRID/FLOW-TRACKING (--ale-flow-tracking)")
+        if not kwargs.get("ale_flow_tracking", True):
+            bits.append("no ALE package: FLOW-TRACKING + void copy + PFAC "
+                        "stiffness off (--no-ale-flow-tracking)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")
@@ -2100,9 +2221,9 @@ class ConverterGUI:
                         "(--no-damping-curve-window)")
         if kwargs.get("stop_added_mass"):
             bits.append("ENDMAS -> /STOP Mmax (--stop-added-mass)")
-        if kwargs.get("dt2ms_tssfac_product"):
-            bits.append("mass-scaled Tmin = TSSFAC x |DT2MS| "
-                        "(--dt2ms-tssfac-product)")
+        if not kwargs.get("dt2ms_tssfac_product", True):
+            bits.append("mass-scaled Tmin = |DT2MS| "
+                        "(--no-dt2ms-tssfac-product)")
         if kwargs.get("print_every") is not None:
             bits.append(f"/PRINT/-{kwargs['print_every']} "
                         f"(--print-every {kwargs['print_every']})")
@@ -2135,6 +2256,37 @@ class ConverterGUI:
         if not kwargs.get("maxint_stress_all", True):
             bits.append("no STRESS/ALL for MAXINT > 3 "
                         "(--no-maxint-stress-all)")
+        # R14 parity round 10
+        if not kwargs.get("shrf_ashear", True):
+            bits.append("SHRF not carried, Ashear 5/6 (--no-shrf-ashear)")
+        if not kwargs.get("nip1_one_point", True):
+            bits.append("NIP 1 written N 2 (--no-nip1-one-point)")
+        if not kwargs.get("implicit_end_fixpoint", True):
+            bits.append("no end fix point (--no-implicit-end-fixpoint)")
+        if kwargs.get("implicit_rayleigh_damping"):
+            bits.append("/IMPL/DYNA/DAMP from *DAMPING_GLOBAL "
+                        "(--implicit-rayleigh-damping)")
+        if not kwargs.get("erode_tsmin_rule", True):
+            bits.append("ERODE 1 + TSLIMT > 0 as a deletion floor "
+                        "(--no-erode-tsmin-rule)")
+        if not kwargs.get("vacuum_light_fluid", True):
+            bits.append("*MAT_VACUUM stays /MAT/VOID "
+                        "(--no-vacuum-light-fluid)")
+        if not kwargs.get("ale_inflow_ebcs", True):
+            bits.append("ALE inflow kept as /IMPVEL (--no-ale-inflow-ebcs)")
+        if not kwargs.get("rigid_tool_penalty_cap", True):
+            bits.append("rigid-tool contacts keep Stmax 0 "
+                        "(--no-rigid-tool-penalty-cap)")
+        if not kwargs.get("initial_void_copy", True):
+            bits.append("no *INITIAL_VOID void copy (--no-initial-void-copy)")
+        if kwargs.get("clis_pfac_stiffness", False):
+            bits.append("CLIS PFAC stiffness (--clis-pfac-stiffness)")
+        if not kwargs.get("surfatyp_all_parts", True):
+            bits.append("SURFATYP 5 / 6 with an SSID dropped "
+                        "(--no-surfatyp-all-parts)")
+        if not kwargs.get("tiebreak_companion_stfac", True):
+            bits.append("tiebreak companion Stfac 0 "
+                        "(--no-tiebreak-companion-stfac)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

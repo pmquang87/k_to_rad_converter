@@ -1957,10 +1957,12 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
         # Card 1 field 3 (cols 21-30): SHRF, the transverse shear correction
         # factor, as STATED - a blank cell is 0.0 = "not given" (LS-DYNA's
         # own default is 1.0), the SectionTshell / *PART_COMPOSITE rule.
-        # Stored for the writer's notes; /PROP/SHELL Ashear is not written
-        # from it (ROADMAP round 10).
+        # R14 round 10, A1: writer/mesh._shrf_ashear writes it to the
+        # /PROP/SHELL Ashear cell; card_given marks a section the deck
+        # states (k2rad's placeholder sections keep Ashear 0).
         sec.shrf = (to_float(f1[2]) if len(f1) > 2 and f1[2].strip()
                     else 0.0)
+        sec.card_given = True
         # Card 2 field 8 (cols 71-80): EDGSET, the 2D-seatbelt flow-direction
         # node set. Only writer/seatbelts.py reads it, to report it as dropped.
         sec.nsid = to_int(f2[7]) if len(f2) > 7 else 0
@@ -4841,11 +4843,16 @@ def handle_constrained_lagrange_in_solid(block: Block, state: ConversionState) -
     start = to_float(f2[0]) if f2 else 0.0
     end   = to_float(f2[1]) if len(f2) > 1 else 0.0
     pfac  = to_float(f2[2]) if len(f2) > 2 else 0.1
+    # R14 round 10, A10 (D-11): ``pfac`` keeps its fold (<= 0 -> 0.1) for
+    # every older reader; ``pfac_stated`` is the cell as written (0 = LS's
+    # default 0.1, < 0 = a load-curve id) for --clis-pfac-stiffness and the
+    # CLIS inventory sentence
     state.lagrange_in_solid.append(ConstrainedLagrangeInSolid(
         slave=to_int(f1[0]), master=to_int(f1[1]),
         sstyp=to_int(f1[2]) if len(f1) > 2 else 0,
         mstyp=to_int(f1[3]) if len(f1) > 3 else 0,
-        ctype=ctype, pfac=pfac if pfac > 0 else 0.1, start=start, end=end))
+        ctype=ctype, pfac=pfac if pfac > 0 else 0.1, start=start, end=end,
+        pfac_stated=pfac))
 
 
 def handle_initial_void(block: Block, state: ConversionState) -> None:
@@ -7030,6 +7037,8 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     # sfmt read for --auto-gapmin's offset term only (CardStack K-04).
     f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     sfs = to_float(f4[0]) if f4 else 0.0
+    # R14 round 10, A8: SFM, read for the rigid-tool penalty cap only
+    sfm = to_float(f4[1]) if len(f4) > 1 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
     sfst = to_float(f4[4]) if len(f4) > 4 else 0.0
@@ -7046,7 +7055,7 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
                                       if thermal else None),
                              interference=interference,
                              thkopt=thkopt, shlthk_c=shlthk_c,
-                             sfst=sfst, sfmt=sfmt, **opt)
+                             sfst=sfst, sfmt=sfmt, sfm=sfm, **opt)
     )
 
 
@@ -7693,13 +7702,17 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
     f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     sst = to_float(f3[2]) if len(f3) > 2 else 0.0
     mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+    # Card3 SFSA / SFSB: the penalty scale of the post-failure contact
+    # (round 10, B3; the companion /INTER/TYPE25's Stfac)
+    sfs = to_float(f3[0]) if f3 else 0.0
+    sfm = to_float(f3[1]) if len(f3) > 1 else 0.0
 
     rec = ContactTiebreak(inter_id, title, ssid, sstyp, msid, mstyp, family,
                           keyword=kw, only=only, one_way=one_way, option=option,
                           nfls=nfls, sfls=sfls, param=param, eraten=eraten,
                           erates=erates, ct2cn=ct2cn, cn=cn, tblcid=tblcid,
                           thkoff=thkoff, nflf=nflf, sflf=sflf, nen=nen, mes=mes,
-                          fs=fs, fd=fd, sst=sst, mst=mst,
+                          fs=fs, fd=fd, sst=sst, mst=mst, sfs=sfs, sfm=sfm,
                           mortar=mortar, user=user, damping=damping, mpp=mpp)
 
     # ── OPTION 4: LS-DYNA itself does not tie tangentially ───────────────
@@ -8673,7 +8686,12 @@ def handle_control_contact(block: Block, state: ConversionState) -> None:
     shlthk = to_int(f[3])   if len(f) > 3 else 0
     penopt = to_int(f[4])   if len(f) > 4 else 1
     thkchk = to_int(f[5])   if len(f) > 5 else 0
-    state.ctrl_contact = ControlContact(slsfac, rwpnal, islchk, shlthk, penopt, thkchk)
+    # round 10, B7: Card 6 (optional) field 1 SHLEDG, Vol I R17 p.12-79 -
+    # the parser keeps a blank card in its slot, so raw[5] is Card 6
+    f6 = _card(raw, 5, fixed=True, n=8, w=10)
+    shledg = to_int(f6[0]) if f6 else 0
+    state.ctrl_contact = ControlContact(slsfac, rwpnal, islchk, shlthk, penopt,
+                                        thkchk, shledg)
 
 
 def handle_control_cpu(block: Block, state: ConversionState) -> None:
@@ -9204,7 +9222,9 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
     # (writer/assembly.py) reads MAXINT > 3 only. --no-maxint-stress-all
     # (the user's decision 8 of 2026-11-01) keeps the read and writes no
     # STRESS/ALL line, and the line says so - the MAXINT < -3 line too (the
-    # fix round of the wave-D review).
+    # fix round of the wave-D review). R14 round 10, A14: MAXINT -3 .. -1 ask
+    # for the same per-point output with |MAXINT| <= 3 and are named too
+    # (they used to pass in silence); no byte moves.
     if maxint > 3 and not state.options.maxint_stress_all:
         state.warn(
             f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (> 3: d3plot output "
@@ -9230,6 +9250,17 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
             + ("" if state.options.maxint_stress_all else
                ", and for no MAXINT under --no-maxint-stress-all")
             + ", so the engine deck keeps STRESS/MEMB / UPPER / LOWER.")
+    elif maxint < 0:
+        # R14 round 10, A14: -3 .. -1 asked for the 'no averaging' output
+        # too, which used to pass in silence
+        state.warn(
+            f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (< 0: |MAXINT| = "
+            f"{-maxint} integration points at every in-plane point, no "
+            "averaging, Vol I R17 p.16-67) - with |MAXINT| <= 3 the engine "
+            "deck keeps STRESS/MEMB / UPPER / LOWER, and OpenRadioss writes "
+            "UPPER / LOWER as the mean over the element's NPTR x NPTS "
+            "in-plane points (tensorc.F:179, 835-840): the per-point output "
+            "LS-DYNA writes is not reproduced.")
 
 
 def handle_database_jntforc(block: Block, state: ConversionState) -> None:
@@ -12246,6 +12277,16 @@ def handle_mat_vacuum(block: Block, state: ConversionState) -> None:
 
     RHO is written verbatim, 0.0 included — ``hm_read_mat.F90:1575-1583``
     exempts law 0 from ERROR 683.
+
+    **The route is the writer's (R14 round 10, A7 1a).** On an
+    ``*ALE_MULTI-MATERIAL_GROUP`` deck whose one fluid partner k2rad writes
+    as ``/MAT/HYD_VISC`` + ``/EOS``, ``writer/materials``
+    ``_resolve_vacuum_light_fluid`` writes the vacuum MID as a LAW6
+    light-fluid copy of that fluid instead (``--no-vacuum-light-fluid``
+    keeps ``/MAT/VOID``), so this parse-time sentence names both routes and
+    the write-time sentence says which one the deck got. The earlier claim
+    that no material reaches the vacuum region was MEASURED false on
+    stagnation_A: the water advects into the LAW0 cells and is DELETED there.
     """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -12261,20 +12302,23 @@ def handle_mat_vacuum(block: Block, state: ConversionState) -> None:
     rho = to_float(f[1]) if len(f) > 1 else 0.0
     state.mat_vacuum[mid] = MatVacuum(mid=mid, title=title, rho=rho)
     state.warn(
-        f"*MAT_VACUUM {mid} -> /MAT/VOID/{mid} (LAW0, RHO_I = {rho:g}). "
-        "Radioss has no vacuum MATERIAL — the word appears nowhere in the 2022 "
-        "Reference or User Guide — but /MAT/VOID is a region that carries no "
-        "stress at all, which is what the LS-DYNA card means, and it is the "
-        "same target a bare *MAT_NULL takes here. It exists so the vacuum "
-        "*PART resolves (a /PART naming no /MAT is ERROR 179). It is NOT "
+        f"*MAT_VACUUM {mid} (RO {rho:g}): Radioss has no vacuum MATERIAL - "
+        "the word appears nowhere in the 2022 Reference or User Guide. k2rad "
+        f"writes either /MAT/VOID/{mid} (LAW0: a region that carries no "
+        "stress at all, the same target a bare *MAT_NULL takes here; it "
+        "exists so the vacuum *PART resolves - a /PART naming no /MAT is "
+        "ERROR 179) or, on an *ALE_MULTI-MATERIAL_GROUP deck whose one fluid "
+        "partner is a LAW6 carrier, a light-fluid copy of that fluid (round "
+        "10, A7; see the vacuum note of the materials section). It is NOT "
         "written into the /MAT/LAW51 phase list: LAW0 is not on "
-        "fill_buffer_51.F:210's allowed list, and it does not need to be — "
+        "fill_buffer_51.F:210's allowed list, and it does not need to be - "
         "hm_read_mat51.F:639-646 checks only that the volume fractions SUM "
-        "ABOVE 1, so the undeclared balance IS Radioss's void. WHAT IS LOST: "
-        "in LS-DYNA the vacuum is an AMMG PHASE that the other materials "
-        "advect into as they expand; here it is a separate single-material ALE "
-        "region on its own mesh, so nothing flows into it. See the "
-        "*ALE_MULTI-MATERIAL_GROUP warning for the whole-deck statement.")
+        "ABOVE 1, so the undeclared balance IS Radioss's void. WHAT IS LOST "
+        "on the LAW0 route: in LS-DYNA the vacuum is an AMMG PHASE that the "
+        "other materials advect into as they expand; a LAW0 cell takes no "
+        "material, so whatever advects into it is DELETED (measured on "
+        "stagnation_A). See the *ALE_MULTI-MATERIAL_GROUP warning for the "
+        "whole-deck statement.")
 
 
 def handle_mat_elastic_plastic_hydro(block: Block,

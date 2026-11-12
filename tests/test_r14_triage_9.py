@@ -63,7 +63,11 @@ def _sha(text: str) -> str:
 #: opt-in arm) also converts the deck with the K3 defaults and checks, with
 #: _k3_default_moves, that this arm is the pinned bytes plus exactly the
 #: K-30 / K-31 cells it names - so that output stays pinned as a whole.
-_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False)
+#: R14 round 10 (A1) adds SHRF -> the /PROP/SHELL Ashear cell as a third
+#: lever the same way (--no-shrf-ashear; the cell is named by
+#: _k3_default_moves as (header + " Ashear", 0.0, value)).
+_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False,
+               shrf_ashear=False)
 
 
 def _k3_default_moves(off: str, on: str):
@@ -74,13 +78,16 @@ def _k3_default_moves(off: str, on: str):
 
 def _k32_shrf_free(warnings):
     """*warnings* without the K-32 note a stated *SECTION_SHELL SHRF draws
-    since the CardStack batch (these decks state SHRF 1.0) - the warning-list
-    pins were measured on the pristine 386444e checkout, which had no such
-    note; the note itself is pinned in tests/test_cardstack_pipeline_props.py.
+    since the CardStack batch (these decks state SHRF 1.0) and without the
+    sentence round 10's --no-shrf-ashear arm writes in its place - the
+    warning-list pins were measured on the pristine 386444e checkout, which
+    had no such note; the notes are pinned in
+    tests/test_cardstack_pipeline_props.py.
     """
     return [w for w in warnings
             if not (w.startswith("*SECTION_SHELL ")
-                    and "the stated SHRF" in w)]
+                    and ("the stated SHRF" in w
+                         or "(--no-shrf-ashear)" in w))]
 
 
 def _blocks(starter: str, prefix: str):
@@ -303,7 +310,8 @@ class RigidPartPidPrecedence(unittest.TestCase):
         r_def, st_def, _e = _convert(a1_probe_deformable_clash())
         self.assertFalse(_has(r_def.warnings, _W_CLASH))
         self.assertEqual(_k3_default_moves(st_on, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_b_LOAD_RIGID_BODY_loads_the_part(self):
         res, st, _e = _convert(_a1_probe(
@@ -607,7 +615,8 @@ class ImplicitN2sType7(unittest.TestCase):
         self.assertEqual(_sha(st), _A2_PLAIN_DEFAULT_SHA)
         _r, st_def, _e = _convert(a2_plain_implicit())
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
         self.assertNotIn("/INTER/TYPE25/", st)
         cells = _type7_cells(st, 78)
         self.assertIsNotNone(cells, st)
@@ -703,7 +712,8 @@ class ImplicitN2sType7(unittest.TestCase):
         r_def, st_def, _e = _convert(a2_explicit())
         self.assertFalse(_has(r_def.warnings, _W_A2))
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_d_an_implicit_ERODING_spelling_keeps_the_TYPE25(self):
         deck = _shell_plate(_IMPL1, _SET5 + _n2s(
@@ -1963,7 +1973,8 @@ class MixedMainThicknessGap(unittest.TestCase):
         self.assertEqual(_type7_igap_gapmin(st_def, 1), (0, 0.0))
         self.assertFalse(_has(r_def.warnings, _W_A10))
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/2", 5, 0)])
+                         [("/PROP/SHELL/2", 5, 0),
+                          ("/PROP/SHELL/2 Ashear", 0.0, 1.0)])
 
     def test_b_two_thicknesses_take_the_thinner_and_OPTT_wins(self):
         _r, st, _e = _convert(_a10_gapc(t_b=0.6), **_ON)
@@ -4352,7 +4363,8 @@ class AleFlowTracking(unittest.TestCase):
         self.assertIn("RMS 253.09 -> 749.89 %", hits[0])
         _r, st_def, _e = _convert(b8_bird())
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
         # a *CONTROL_ALE deck WITHOUT a reference-system card: today's
         # bytes and today's warning list exactly (the generic note unchanged)
         res0, st0, _e0 = _convert(b8_bird(card=False, mu="0.0"), **_K3_OFF)
@@ -4364,15 +4376,27 @@ class AleFlowTracking(unittest.TestCase):
                              "is not converted."))
         _r, st0_def, _e = _convert(b8_bird(card=False, mu="0.0"))
         self.assertEqual(_k3_default_moves(st0, st0_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_card_bytes_bcrot0_and_bcrot7(self):
-        res, st, eng = _convert(b8_bird(), ale_flow_tracking=True, **_K3_OFF)
-        self.assertEqual(_sha(st), _B8_BASE_FT_STARTER)
-        # the opt-in arm with the K3 defaults: those bytes plus K-31's cell
-        _r, st_def, _e = _convert(b8_bird(), ale_flow_tracking=True)
+        # R14 round 10 (A10 / D-6): the card is written only inside the
+        # round-10 package (the void copy + the PFAC stiffness), the
+        # DEFAULT, so the deck is the package deck b8_bird(clis=True); the
+        # card ALONE (round 9's flag-on digest _B8_BASE_FT_STARTER of
+        # b8_bird()) is no longer written - b8_bird() gets the package
+        # sentence instead
+        res, st, eng = _convert(b8_bird(clis=True), **_K3_OFF)
+        r_alone, st_alone, _e = _convert(b8_bird(), ale_flow_tracking=True,
+                                         **_K3_OFF)
+        self.assertEqual(_sha(st_alone), _B8_BASE_386444E_STARTER)
+        self.assertTrue(_has(r_alone.warnings, _W_B8_SKIP, "the measured "
+                             "package", "it needs an *INITIAL_VOID part"))
+        # the package arm with the K3 defaults: those bytes plus K-31's cell
+        _r, st_def, _e = _convert(b8_bird(clis=True))
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
         lines = st.splitlines()
         i = lines.index("/ALE/GRID/FLOW-TRACKING")
         self.assertEqual(lines[i:i + 5], _B8_CARD)
@@ -4388,9 +4412,9 @@ class AleFlowTracking(unittest.TestCase):
                              "alew7.F:186-227", "WARNING 100211",
                              "BCTRAN 3 is carried by the ALE nodes' own /BCS",
                              "+1484.66 -> +17.00 %", "253.09 -> 749.89 %",
-                             "NEGATIVE RHO"), res.warnings)
+                             "+1484.66 -> +8.15 %"), res.warnings)
         self.assertFalse(_has(res.warnings, _W_B8_SKIP))
-        _r7, st7, _e7 = _convert(b8_bird(bcrot=7), ale_flow_tracking=True)
+        _r7, st7, _e7 = _convert(b8_bird(bcrot=7, clis=True))
         lines7 = st7.splitlines()
         j = lines7.index("/ALE/GRID/FLOW-TRACKING")
         self.assertEqual(lines7[j + 4], "        -1                   0")
@@ -4402,7 +4426,8 @@ class AleFlowTracking(unittest.TestCase):
         converted' beside the B8 sentence that converts it; a refused plan
         and the default keep the note word for word (it fires on 6 match
         rows)."""
-        res, _st, _e = _convert(b8_bird(), ale_flow_tracking=True)
+        # R14 round 10 (A10 / D-6): an accepted plan is the package deck's
+        res, _st, _e = _convert(b8_bird(clis=True))
         self.assertTrue(_has(res.warnings, "*CONTROL_ALE (METH=", "the "
                              "*ALE_REFERENCE_SYSTEM_GROUP 1 card IS converted "
                              "under --ale-flow-tracking"))
@@ -4420,11 +4445,20 @@ class AleFlowTracking(unittest.TestCase):
                 self.assertFalse(_has(r2.warnings, "card IS converted"))
 
     def test_every_refusal_class(self):
+        # R14 round 10 (A10 / D-6, the flag ON by default): a deck with
+        # no PRTYPE-4 card keeps round 9's per-card skip sentence (so its
+        # default text does not move); the reasons sentence is a PRTYPE-4
+        # deck's
+        for prtype in (0, 5, 3):
+            with self.subTest(prtype=prtype):
+                res, st, eng = _convert(b8_bird(prtype=prtype),
+                                        ale_flow_tracking=True)
+                self.assertNotIn("/ALE/GRID", st + eng)
+                self.assertTrue(_has(res.warnings, "*ALE_REFERENCE_SYSTEM_"
+                                     f"GROUP 1 (PRTYPE {prtype}) has no "
+                                     "OpenRadioss analogue and is skipped."))
+                self.assertFalse(_has(res.warnings, _W_B8_REFUSED))
         cases = (
-            ({"prtype": 0}, "PRTYPE 0: only PRTYPE 4 has an OpenRadioss "
-                            "analogue (FLOW-TRACKING)"),
-            ({"prtype": 5}, "PRTYPE 5: only PRTYPE 4"),
-            ({"prtype": 3}, "PRTYPE 3: only PRTYPE 4"),
             ({"prid": 1}, "PRID 1: FLOW-TRACKING averages over every ALE "
                           "node"),
             ({"icr": 1}, "ICR 1: FLOW-TRACKING turns about the centre of "
@@ -4471,7 +4505,9 @@ class AleFlowTracking(unittest.TestCase):
         drives the energy error -46.5 -> +99.9 %)."""
         deck = b8_bird(card=False, clis=True)
         r_on, s_on, e_on = _convert(deck, ale_flow_tracking=True)
-        r_off, s_off, e_off = _convert(deck)
+        # R14 round 10 (A10 / D-6): the flag is ON by default, so the
+        # flag-off arm is the explicit --no-ale-flow-tracking
+        r_off, s_off, e_off = _convert(deck, ale_flow_tracking=False)
         self.assertEqual((s_on, e_on), (s_off, e_off))
         self.assertEqual(r_on.warnings, r_off.warnings)
         self.assertNotIn("/ALE/GRID", s_on)
@@ -4672,7 +4708,8 @@ class ShellInSolidRetune(unittest.TestCase):
         self.assertEqual(_sha(eng), _B4_SIS_386444E_ENGINE)
         _r, st_def, eng_def = _convert(_t8._sis_ale_deck())
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/3", 2, 0)])
+                         [("/PROP/SHELL/3", 2, 0),
+                          ("/PROP/SHELL/3 Ashear", 0.0, 1.0)])
         self.assertEqual(eng_def, eng)
         self.assertIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", st)
         self.assertNotIn("/INTER/TYPE18", st)
@@ -4953,14 +4990,12 @@ class Round9OptInWiringB(_t8.Round8OptInWiringB):
     the GUI end to end, convert() / ConvertOptions (default False) and
     cli.main()'s call - round 8's opt-in checks for B8."""
 
-    _OPT_IN = {"--ale-flow-tracking": "ale_flow_tracking"}
-    _HELP_FIGURES = {
-        "--ale-flow-tracking": ("/ALE/GRID/FLOW-TRACKING",
-                                "I_def -1 for BCEXP 7",
-                                "+1484.66 -> +17.00 %",
-                                "1189.95 -> 27.74 %",
-                                "253.09 -> 749.89 %", "OFF by default"),
-    }
+    # R14 round 10 (A10 / D-6): A10's package makes FLOW-TRACKING a default
+    # on its key class (the findings' 6.3a gate PASSED), so the flag left
+    # this class for test_r14_round10.Round10FlagWiringA2 with its
+    # re-measured figures; round 9's part B has no opt-in left
+    _OPT_IN: dict = {}
+    _HELP_FIGURES: dict = {}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -5180,13 +5215,15 @@ class Round9RoadmapRecordB(unittest.TestCase):
             if not ln.startswith("|"):
                 break
             rows.append(ln)
-        self.assertTrue(rows[0].endswith("| round 8 | round 9 |"), rows[0])
+        # round 10 (B's docs) appended its own column after round 9's: the
+        # round-9 cell is the second-to-last
+        self.assertIn("| round 8 | round 9 |", rows[0])
         self.assertEqual(len(rows), 10)
         width = _t7._md_cells(rows[0])
         for r in rows[1:]:
             with self.subTest(row=r[:48]):
                 self.assertEqual(_t7._md_cells(r), width)
-        last = rows[2].rstrip(" |").rsplit("|", 1)[1]
+        last = rows[2].rstrip(" |").rsplit("|", 2)[1]
         self.assertIn("B1", last)
         self.assertIn("66 323 cycles", last)
 
@@ -5203,7 +5240,9 @@ class Round9RoadmapRecordB(unittest.TestCase):
 
     def test_the_round_9_not_list_is_numbered_1_to_28(self):
         s = self._at("**What round 9 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        # round 10's sections sit between this list and the starter-failure
+        # paragraph (the move round 9 made for round 8's anchors)
+        e = self._at("**What round 10 closes, and what it does NOT.**")
         nums = [int(m.group(1)) for m in
                 (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
                 if m]
@@ -5212,7 +5251,7 @@ class Round9RoadmapRecordB(unittest.TestCase):
 
     def test_entries_3_4_17_24_26_as_decided(self):
         s = self._at("**What round 9 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        e = self._at("**What round 10 closes, and what it does NOT.**")
         block = {n: _t7._collapse("\n".join(self.lines[a:b]))
                  for n, (a, b) in enumerate(self._items(s, e), 1)}
         for needle in ("B4's gate FAILED", "1.140×", "MESSAGE 205 + 207",
@@ -5286,8 +5325,11 @@ class Round9ChangelogReSumsB(unittest.TestCase):
         text = _t7._collapse(_t7._read7("CHANGELOG.md"))
         a = re.search(r"Part A's default bytes move (\d+) deck keys / (\d+) "
                       r"emitted models", text)
+        # round 10's part-B entry sits above round 9's and uses the same
+        # phrase: read round 9's own part-B entry
+        r9 = text.index("R14 CAMPAIGN TRIAGE batch, round 9 — PART B")
         b = re.search(r"Part B's default bytes move (\d+) deck keys / (\d+) "
-                      r"emitted models \(B1", text)
+                      r"emitted models \(B1", text[r9:])
         self.assertIsNotNone(a)
         self.assertIsNotNone(b)
         tot = (int(a.group(1)) + int(b.group(1)),
@@ -5316,8 +5358,9 @@ class Round9FlagsInReadme(unittest.TestCase):
         spellings = (["--no-" + f[2:] for f in on] + opt
                      + ["--weld-trajectory-window"])
         # part A: 8 default levers + 2 opt-ins; part B: 5 default levers +
-        # 1 opt-in + B1's window option
-        self.assertEqual(len(spellings), 17)
+        # B1's window option - its 1 opt-in, --ale-flow-tracking, is a round-10
+        # default since A10 / D-6 (test_r14_round10.Round10FlagWiringA2)
+        self.assertEqual(len(spellings), 16)
         for flag in spellings:
             with self.subTest(flag=flag):
                 self.assertTrue(any(flag in ln for ln in body),

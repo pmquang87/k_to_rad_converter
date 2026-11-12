@@ -80,9 +80,14 @@ with `Gapmin` `0.03 / 0.03 / 0.14` per interface, then stalls in a limit cycle
 when the same uniform value is re-used on a finer TET10 mesh whose measured pin
 clearances are `0.12` and `0.16`.)
 
-`--auto-gapmin` removes the guesswork: it sets each surface-to-surface
-interface's `Gapmin` to `--gapmin-factor` × the minimum node-to-node distance
-between its two parts (default factor `0.8`). Inspect first with
+`--auto-gapmin` removes the guesswork: it measures each surface-to-surface
+interface's minimum node-to-SEGMENT clearance d between its two parts and
+writes `Gapmin` = F × d (F = `--gapmin-factor`, default `0.8`) or, where
+LS-DYNA offsets the shells (the `--shell-offset-gapmin` predicate),
+T + F × (d − T) with T = t/2 of the shell secondary (+ t/2 of a shell main),
+capped at 0.5 × the smallest main-segment side (MEASURED on the CardStack
+`deck_a` probe: d 0.1805, T 0.175 → `Gapmin` 0.1794, starter
+`MINIMUM GAP 0.1794`). Inspect first with
 `--suggest-gapmin` (read-only — prints the clearances and exits); an explicit
 `--inter-gapmin ID=VAL` always wins over the suggestion. Self-contacts and
 single-surface contacts have no two-part clearance and are reported as skipped.
@@ -93,9 +98,10 @@ python k2rad.py model.k --auto-gapmin                     # apply (factor 0.8)
 python k2rad.py model.k --auto-gapmin --gapmin-factor 0.6 # more conservative
 ```
 
-Lower the factor if an interface still reports initial penetration (node-to-node
-distance over-estimates the true node-to-segment clearance); raise it toward
-`1.0` if a contact fails to engage.
+Lower the factor if an interface still reports initial penetration; raise it
+toward `1.0` if a contact fails to engage. Where the cap acts below T the line
+says so and names `--inter-gapmin <id>=<T>` (measured in round 10: the capped
+gap engages a card 0.075 mm inside LS-DYNA's offset, ROADMAP K-04).
 
 ## Deformable–deformable contact (`--deformable-contact-recipe`)
 
@@ -214,10 +220,11 @@ such a model EXPLICIT until the engine is fixed.
   implicit stub where k2rad injects one (a deck with no contact of its own;
   the warning names a deck whose own contacts leave no stub), which carries
   the contact's friction when every routed contact agrees on it. MEASURED on
-  doorbeam (part-driven since A1): IE END -0.78 .. -28.12 %, RMS 7.21 ..
-  15.26 % of the LS peak over 125 runs at nt 4 and nt 2, run to run on three
-  branches (mostly -27.76 .. -28.12 %), where the TYPE25 ended +53.91 % /
-  81.05 %. A 4-node one-way TYPE7 on a coarse RIGID base can end NORMAL with
+  doorbeam (part-driven since A1), on the pre-round-10 bytes: IE END -0.78
+  .. -28.12 %, RMS 7.21 .. 15.26 % of the LS peak over 125 runs at nt 4 and
+  nt 2, run to run on three branches (mostly -27.76 .. -28.12 %), where the
+  TYPE25 ended +53.91 % / 81.05 %; on the round-10 bytes 12 runs end at
+  -21.37 .. -21.41 % (no second branch seen, which does not exclude one). A 4-node one-way TYPE7 on a coarse RIGID base can end NORMAL with
   the block through - a silent failure where the TYPE25 stops loudly - or
   hold where the TYPE25 lets the block through behind a NORMAL banner, and
   with the nodes over the base's corners both let it through: the outcome
@@ -259,3 +266,81 @@ such a model EXPLICIT until the engine is fixed.
   solver impose a frame-dependent wrong displacement (a two-block coupon:
   x0.750 of the drive in two oblique frames, x1.000 in one skew, nt 4 = nt 2)
   and the starter print WARNING 312.
+
+## Round 10, part A-i: the end fix point and damping on an implicit run
+
+### The end fix point (round 10, A5)
+
+Default ON, `--no-implicit-end-fixpoint` opts out. A dynamic implicit deck
+(`/IMPL/DYNA/2` from `*CONTROL_IMPLICIT_DYNAMICS` IMASS > 0, with the
+`/IMPL/DT/2` step card) gets ONE `/IMPL/DT/FIXPOINT` at its end time when no
+`--fixpoint-count` grid is written: the two lines `--fixpoint-count 1`
+writes, byte for byte.
+
+- **Why.** `imp_dt.F:53-56`: `TREST = TSTOP - TT; IF (IMCONV == 1 .AND.
+  TREST > EM10) THEN DT_E = MIN(DT_IMP, TREST); IF (IDYNA > 0) DT_E =
+  DT_IMP` - a static run clips its last step to the remaining time, a
+  dynamic one does not. `resol.F:8317-8318` advances `TT = TT + DT2` and
+  `:8470` solves only while `TT <= TSTOP` (within 1e-10), so the dynamic run
+  ends at the last converged time below the end: an adaptive `/IMPL/DT/2`
+  run can end NORMAL one increment short. The fix point makes `IMP_DTF`
+  (`imp_dt.F:302-321`) cut the step that would pass it to the remainder,
+  then restore the old step.
+- **Scope.** Static decks are untouched (they clip their own last step);
+  `--arclength-riks` writes `/IMPL/DT/3`, under which `lectur.F:3523-3532`
+  disarms every fix point, so none is written; a `--fixpoint-count N > 0`
+  grid already ends at the end time. On an IMFLAG-curve segment
+  (`--imflag-curve-restart`) the point is the segment's own `/RUN` end.
+- **Measured** (nt 4 = nt 2, the R14 roster): the 9 keys / 5 models that
+  ended NORMAL below their end time reach it at +1 cycle with the fifths 1-4
+  of the history unchanged; the END value is then read AT the end time and
+  moves both ways: `ex_14_solid_elform_1` 34 -> 35 cycles, IE END -14.44 % at
+  t 0.01839 -> -33.66 % at t 0.02 (IE RMS 4.51 % over its 200 LS times);
+  `ex_11_beam_elform_1` 35 -> 36 cycles, KE END +1343.37 -> -78.46 %;
+  `ex_14_solid_elform_2` IE END +213.83 -> -0.28 %. Decks that already land on
+  the end time (`ex_14_solid_elform_3`, `ex_16`, `Intermediate_fsi_flap`)
+  print the same rows. 21 R14 keys / 16 models move by the two engine lines.
+- **The sliver.** `IMP_DTF` cuts the step to the remainder whatever its size
+  (`imp_dt.F:311-320`). When the remainder is a sliver of the step, the LAST
+  printed row is an integration artifact: on `efg/metal-cutting/main.k` the
+  step 2.0e-4 is cut to 1.0e-5 and the row at t 0.03 prints K-ENERGY 3.57e8 ..
+  6.06e8 (52.3 .. 111.0 one cycle before; four runs of the same bytes at nt 4)
+  and ERROR 99.9 %; on a 2 x 2 x 2-hex probe the step
+  2.0e-3 is cut to 1.05e-4 and the last row prints KE 170.1 (0.160 before) and
+  ERROR -99.9 %, rows 1-33 equal to the run without the card. Read the row
+  before it. On the R14 stop rows the remainder is 62 - 85 % of the step and
+  the last row is clean (ex_14 elform_1 ERROR 0.4 %, ex_11 -0.2 %). The
+  mechanism of the artifact (the variable-step Newmark update) is not read
+  yet: a ROADMAP item.
+
+### Damping on an implicit run (round 10, A6)
+
+k2rad writes `*DAMPING_GLOBAL` (LCID 0) as the starter `/DAMP` (mass-weighted
+alpha = VALDMP), on implicit decks too. An implicit run never applies it: the
+Reference Guide 2022 says so in its `/IMPL/DYNA/DAMP` comment 2 ("/DAMP
+defined in Starter has no effect on implicit run"), and the engine's only
+`CALL DAMPING` (`resol.F:7216-7219`, with the `DAMPING44` / `DAMPING51`
+branches) sits in the explicit block an implicit run jumps over
+(`resol.F:6406` `IF (IMPL_S == 1)` ... `:6547` `GOTO 111`). Measured on
+`ex_14_solid_elform_1`: deleting the `/DAMP` changes no printed figure of
+the run. Since round 10 every implicit deck that carries a `/DAMP` names it
+(8 R14 keys / 3 models, all dynamic); a dynamic one is UNDAMPED where
+LS-DYNA damps it (its glstat "system damping energy": 1.29493E+07 at t 0.02
+on ex_14, 16.8 % of the external work).
+
+The opt-in `--implicit-rayleigh-damping` writes `/IMPL/DYNA/DAMP` alpha =
+VALDMP x ST, beta 0 right after `/IMPL/DYNA/2` (`freimpl.F:169-176` reads the
+two values; `imp_dyna.F:1810-1828` adds alpha x M x V, LS-DYNA's F = Ds m v,
+Vol I R17 p.15-9 Remark 4; ST = the common STX .. SRZ, all 0 = unity, Remark
+2) and keeps the starter `/DAMP`. It refuses, by name, a static deck (any
+`/IMPL/DYNA*` card turns the run dynamic, `freimpl.F:171`), an LCID > 0, an
+uneven STX .. SRZ, `*DAMPING_PART_*` cards and VALDMP <= 0. Both directions
+are measured (nt 4 = nt 2): on LS-DYNA's own step the card brings the history
+nearer LS-DYNA (`ex_14_solid_elform_1` IE RMS 11.94 -> 10.38 %,
+`ex_15_thick_shell_elform_5` 5.07 -> 3.43 % of the LS peak), on the step
+k2rad ships (the adaptive `/IMPL/DT/2` with the end fix point) it worsens the
+internal energy of both carriers: `ex_14_solid_elform_1` IE RMS 4.51 ->
+5.27 %, KE RMS 2.66 -> 7.56 % over its 200 LS times; `ex_15_thick_shell_elform_5`
+IE RMS 5.31 -> 6.58 %. So it stays an opt-in. (The run-openradioss launcher's
+audit NOTE `damp-window` reads an implicit `/DAMP` as active; the inertness
+above is the engine's.)

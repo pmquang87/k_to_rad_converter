@@ -1847,9 +1847,10 @@ class RigidPartPredicateTests(unittest.TestCase):
     #: union-find) and spells the union out, which the source scan above
     #: allowlists BY NAME.
     _PREDICATE_CALLS = {
-        # _side_has_deformable_part, all_deformable_nodes, and (round 6 A8)
-        # _shell_offset_gapmin's SHLTHK 1 "rigid bodies excluded" test
-        "contacts.py": 3,
+        # _side_has_deformable_part, all_deformable_nodes, (round 6 A8)
+        # _shell_offset_gapmin's SHLTHK 1 "rigid bodies excluded" test, and
+        # (R14 round 10 A8) _rigid_tool_cap's "is the tool all rigid" test
+        "contacts.py": 4,
         # the _LOCAL triads, the *DAMPING_GLOBAL scope, and (round 9 A1)
         # _cnrb_gives_way's "is the clashing PID a rigid PART" test
         "loads.py": 3,

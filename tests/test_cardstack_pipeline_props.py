@@ -439,10 +439,11 @@ class PreloadOnATetBolt(unittest.TestCase):
     nt 4, 20 us) this deck written Isolid 14 (master), 1 (K-30) and 24
     (ELFORM 1 + IHQ 6) gives decoded-equal T01 (GLOBAL + the bolt /SECT, 50
     states from t = 0 to 1.96e-5 s) and byte-equal anim files, so a verdict
-    keyed on the cell would split one run in two. (That run is not a good
-    one - its T01 time step falls from 1.0e-7 s to 2.8e-9 s by t = 1.88e-5
-    s, 1.9e-9 s at least, on all three arms, ROADMAP - and no warning names
-    a preloaded tet any more.)"""
+    keyed on the cell would split one run in two. (That deck is a FREE bar,
+    which collapses at every Isolid: its T01 time step falls from 1.0e-7 s
+    to 2.8e-9 s by t = 1.88e-5 s on all three arms. CLAMPED, the tet twin
+    holds 192.2 .. 208.2 MPa after Tstop and runs NORMAL to 4e-4 s - round
+    10, B9. No warning names a preloaded tet any more.)"""
 
     def _formulation_warnings(self, res):
         return [w for w in res.warnings if "emit /PROP/SOLID Isolid=" in w]
@@ -503,8 +504,9 @@ class Law1ShellGlobalN(unittest.TestCase):
         switches the LAW1 group to N = 0 (global integration,
         cgrtails.F:780-791) and prints WARNING 1084 - MEASURED (starter +
         engine, nt 1, 2026-10-31) on a NIP-1 *MAT_ELASTIC strip: N 2 and 1 x
-        WARNING 1084 on both arms, anim files byte-equal. A one-point
-        section would take N 1 (a ROADMAP item)."""
+        WARNING 1084 on both arms, anim files byte-equal. A triangle-only
+        NIP-1 section takes N 1 since R14 round 10 (A2,
+        tests/test_r14_round10.py); this strip is a QUAD, which keeps N 2."""
         _r, starter, _e = _convert(_shell_deck(nip="1"))
         self.assertEqual(_shell_n(starter), 2)
         _r, s_off, _e = _convert(_shell_deck(nip="1"),
@@ -816,7 +818,8 @@ class GoldenFixtureMoves(unittest.TestCase):
             with self.subTest(stem=stem):
                 self.assertEqual(
                     _sha(_fixture_starter(stem, tet_isolid1=False,
-                                          law1_shell_global_n=False)), sha)
+                                          law1_shell_global_n=False,
+                                          shrf_ashear=False)), sha)
 
     def test_the_default_moves_only_the_planned_cells(self):
         for stem, (fam, old, new, count) in _GOLDEN_MOVES.items():
@@ -846,6 +849,32 @@ class GoldenFixtureMoves(unittest.TestCase):
                                        stem + "_0000.rad")) as fh:
                     gold = fh.read().replace("\r\n", "\n")
                 self.assertEqual(_fixture_starter(stem), gold)
+
+    def test_round10_a1_moves_only_the_ashear_cells(self):
+        """R14 round 10, A1: the four shell goldens' /PROP/SHELL card-3
+        Ashear cell (columns 41-60) goes 0 -> 1 (every section leaves SHRF
+        blank, LS-DYNA's 1.0) - tied_weld has two sections, solid_plastic
+        none; --no-shrf-ashear keeps the K3 default bytes."""
+        want = {"shell_explicit": 1, "rigid_contact": 1, "tied_weld": 2,
+                "implicit_qstat": 1, "solid_plastic": 0}
+        for stem, count in want.items():
+            with self.subTest(stem=stem):
+                off = _fixture_starter(stem, shrf_ashear=False)
+                on = _fixture_starter(stem)
+                lo, ln = off.splitlines(), on.splitlines()
+                self.assertEqual(len(lo), len(ln))
+                head, moved = "", []
+                for a, b in zip(lo, ln):
+                    if a.startswith("/"):
+                        head = a
+                    if a != b:
+                        moved.append((head, a, b))
+                self.assertEqual(len(moved), count, moved)
+                for h, a, b in moved:
+                    self.assertTrue(h.startswith("/PROP/SHELL/"), h)
+                    self.assertEqual((a[:40], a[60:]), (b[:40], b[60:]))
+                    self.assertEqual((a[40:60].strip(), b[40:60].strip()),
+                                     ("0", "1"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -917,10 +946,11 @@ class ElformSixteenLogText(unittest.TestCase):
         self.assertIn("SAME integration class", w[1])
 
     def test_the_bytes_do_not_move(self):
-        _r, starter, _e = _convert(_shell_deck(elform=16, mat=_K32_LAW44))
+        _r, starter, _e = _convert(_shell_deck(elform=16, mat=_K32_LAW44),
+                                   shrf_ashear=False)
         self.assertEqual(_sha(starter), _MASTER_PINS["k32_elform16"])
         _r, starter, _e = _convert(_shell_deck(elform=16, mat=_K32_LAW44),
-                                   shell_formulation="qeph")
+                                   shell_formulation="qeph", shrf_ashear=False)
         self.assertEqual(_sha(starter), _MASTER_PINS["k32_elform16_qeph"])
 
 
@@ -936,8 +966,8 @@ class OpttAdvice(unittest.TestCase):
     /INTER/TYPE25 has no Gapmin column and reads neither, and OPTT IS its
     per-part gap lever (i25sti3.F:217-218)."""
 
-    def _optt(self):
-        res, starter, _e = _convert(_optt_deck())
+    def _optt(self, **kw):
+        res, starter, _e = _convert(_optt_deck(), **kw)
         msg = [w for w in res.warnings if "OPTT on part(s)" in w]
         self.assertEqual(len(msg), 1, msg)
         return msg[0], starter
@@ -955,31 +985,43 @@ class OpttAdvice(unittest.TestCase):
         self.assertIn("Gap_scale x OPTT / 2", msg)
 
     def test_the_bytes_do_not_move(self):
-        _msg, starter = self._optt()
+        _msg, starter = self._optt(shrf_ashear=False)
         self.assertEqual(_sha(starter), _MASTER_PINS["k32_optt"])
 
 
 class ShrfNote(unittest.TestCase):
-    """*SECTION_SHELL SHRF is read (K-0P) but not converted: Ashear stays 5/6
-    (hm_read_prop01.F:244). A stated SHRF other than 5/6 is named once."""
+    """*SECTION_SHELL SHRF (K-0P read it; R14 round 10, A1 writes it): the
+    /PROP/SHELL Ashear cell carries the stated factor, a blank as LS-DYNA's
+    1.0, a value within 0.005 of 5/6 as the starter's own 5/6 (the cell 0,
+    hm_read_prop01.F:244). The K-32 'NOT converted' note survives as the
+    --no-shrf-ashear sentence, which names every section whose cell the
+    default writes (stated AND blank); the default path names only what it
+    did not write as stated (the exclusion, the window, the range, the
+    Kirchhoff elements - tests/test_r14_round10.py)."""
 
     def _notes(self, deck, **kw):
         res, starter, _e = _convert(deck, **kw)
         return [w for w in res.warnings if "SHRF" in w
                 and "Ashear" in w], starter
 
-    def test_a_stated_shrf_1_is_named(self):
+    def test_a_stated_shrf_1_is_named_only_under_the_opt_out(self):
         notes, _s = self._notes(_shell_deck(mat=_K32_LAW44, shrf="1.0"))
+        self.assertEqual(notes, [])
+        notes, _s = self._notes(_shell_deck(mat=_K32_LAW44, shrf="1.0"),
+                                shrf_ashear=False)
         self.assertEqual(len(notes), 1, notes)
-        self.assertIn("*SECTION_SHELL 1", notes[0])
-        self.assertIn("SHRF 1", notes[0])
-        self.assertIn("5/6", notes[0])
-        self.assertIn("hm_read_prop01.F:244", notes[0])
-        self.assertIn("ROADMAP", notes[0])
-        # a blank SHRF deviates the same way and is not listed - said so
-        self.assertIn("A section that leaves SHRF blank (LS-DYNA's default "
-                      "1.0, Vol I R17 p.41-63) runs at 5/6 the same way and "
-                      "is not listed here.", notes[0])
+        self.assertTrue(notes[0].startswith(
+            "*SECTION_SHELL 1 (SHRF 1): SHRF, the transverse shear "
+            "correction factor, is NOT carried to the /PROP/SHELL Ashear cell "
+            "(--no-shrf-ashear)"), notes[0])
+        for needle in ("5/6", "hm_read_prop01.F:244", "p.41-63",
+                       "-0.041 % (L/t 3) / -0.018 % (L/t 5)",
+                       "all 2642 R14 shell parts",
+                       "The default writes the factor (a value within 0.005 "
+                       "of 5/6 keeps the starter's own 5/6)."):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, notes[0])
+        self.assertNotIn("ROADMAP", notes[0])
 
     def test_one_note_groups_the_sections_by_value(self):
         """Three sections, two values: ONE warning, grouped by SHRF."""
@@ -990,7 +1032,8 @@ class ShrfNote(unittest.TestCase):
                   + "*SECTION_SHELL\n" + _row(3, 2, "1.0", 5) + "\n"
                   + _row(1.0) + "\n")
         notes, _s = self._notes(_shell_deck(mat=_K32_LAW44, shrf="1.0",
-                                            second=second))
+                                            second=second),
+                                shrf_ashear=False)
         self.assertEqual(len(notes), 1, notes)
         self.assertTrue(notes[0].startswith(
             "*SECTION_SHELL 2 (SHRF 0.9); 1, 3 (SHRF 1): "), notes[0])
@@ -999,7 +1042,8 @@ class ShrfNote(unittest.TestCase):
         """The ELFORM sentence skips implicit decks; the SHRF note does not
         (the Ashear cell is the same on both)."""
         notes, _s = self._notes(_shell_deck(mat=_K32_LAW44, shrf="1.0",
-                                            control=_IMPLICIT))
+                                            control=_IMPLICIT),
+                                shrf_ashear=False)
         self.assertEqual(len(notes), 1, notes)
 
     def test_blank_and_five_sixths_are_silent(self):
@@ -1008,6 +1052,13 @@ class ShrfNote(unittest.TestCase):
                 notes, _s = self._notes(_shell_deck(mat=_K32_LAW44,
                                                     shrf=shrf))
                 self.assertEqual(notes, [])
+        # the opt-out names the blank too: its cell is the one the default
+        # writes (1.0), the K3 review's minor
+        notes, _s = self._notes(_shell_deck(mat=_K32_LAW44),
+                                shrf_ashear=False)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertTrue(notes[0].startswith(
+            "*SECTION_SHELL 1 (SHRF blank / 0): "), notes[0])
 
     def test_the_ids_of_one_value_are_capped_at_10(self):
         """Eleven sections stating SHRF 1.0: ten ids, then the count."""
@@ -1018,7 +1069,7 @@ class ShrfNote(unittest.TestCase):
                           + "*SECTION_SHELL\n" + _row(i, 2, "1.0", 5) + "\n"
                           + _row(1.0) + "\n" for i in range(1, 12))
                 + _K32_LAW44 + "*END\n")
-        notes, _s = self._notes(deck)
+        notes, _s = self._notes(deck, shrf_ashear=False)
         self.assertEqual(len(notes), 1, notes)
         self.assertTrue(notes[0].startswith(
             "*SECTION_SHELL 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ... (11 sections) "
@@ -1029,7 +1080,8 @@ class ShrfNote(unittest.TestCase):
         rewrites its ELFORM 14 / 15 /PROP/SHELL as a /PROP/SOLID, which has
         no Ashear cell: no note. tests/test_r14_triage_9.b2_ax15 states SHRF
         1.0 on its ELFORM 15 section; with --no-axisymmetric-2d the section
-        is a /PROP/SHELL again and is named."""
+        is a /PROP/SHELL again and A1's exclusion names it (a 2-D ELFORM:
+        the cell stays 0)."""
         notes, starter = self._notes(_t9.b2_ax15())
         self.assertIn("/PROP/SOLID/1", starter)
         self.assertNotIn("/PROP/SHELL/", starter)
@@ -1037,10 +1089,13 @@ class ShrfNote(unittest.TestCase):
         notes, starter = self._notes(_t9.b2_ax15(), axisymmetric_2d=False)
         self.assertIn("/PROP/SHELL/1", starter)
         self.assertEqual(len(notes), 1, notes)
-        self.assertTrue(notes[0].startswith("*SECTION_SHELL 1 (SHRF 1): "),
-                        notes[0])
+        self.assertTrue(notes[0].startswith(
+            "*SECTION_SHELL 1 (ELFORM 15): SHRF is NOT written to the "
+            "/PROP/SHELL Ashear cell (it stays 0: the starter's 5/6, or 0 "
+            "on an N-1 property)"),
+            notes[0])
 
-    def test_the_bytes_do_not_move(self):
+    def test_a_stated_1_and_a_blank_write_the_same_bytes(self):
         _n, s1 = self._notes(_shell_deck(mat=_K32_LAW44, shrf="1.0"))
         _n, s0 = self._notes(_shell_deck(mat=_K32_LAW44))
         self.assertEqual(s1, s0)

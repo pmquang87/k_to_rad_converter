@@ -7330,27 +7330,32 @@ $#  dtinit    tssfac      isdo    tslimt     dt2ms
 class MassScalingTests(unittest.TestCase):
     """*CONTROL_TIMESTEP DT2MS<0 → engine /DT/NODA/CST (mass scaling)."""
 
-    def _engine(self, deck=DT2MS_K):
+    def _engine(self, deck=DT2MS_K, **kw):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = os.path.join(tmp.name, "t.k")
         with open(path, "w") as fh:
             fh.write(deck)
-        result = convert(path)
+        result = convert(path, **kw)
         return result, Path(result.engine_path).read_text()
 
     def test_dt2ms_emits_dt_noda_cst(self):
         _, engine = self._engine()
         self.assertIn("/DT/NODA/CST/0", engine)
 
-    def test_tmin_is_abs_dt2ms(self):
-        # Tmin = |DT2MS| holds the run at the LS-DYNA target; Tsca defaults to 0.9
-        # when *CONTROL_TIMESTEP TSSFAC is 0.
-        _, engine = self._engine()
-        row = engine.split("/DT/NODA/CST/0", 1)[1].splitlines()[1]
-        tsca, tmin = row.split()
-        self.assertEqual(float(tsca), 0.9)
-        self.assertAlmostEqual(float(tmin), 1.112e-6, places=12)
+    def test_tmin_is_tssfac_times_abs_dt2ms(self):
+        # R14 round 10, A4: Tmin = TSSFAC x |DT2MS| = 0.9 x 1.112e-6 =
+        # 1.0008e-6, LS-DYNA's minimum step (Vol I R17 p.12-585); Tsca
+        # defaults to 0.9 when *CONTROL_TIMESTEP TSSFAC is 0.
+        # --no-dt2ms-tssfac-product keeps Tmin = |DT2MS| = 1.112e-6.
+        for kw, want in (({}, 1.0008e-6),
+                         ({"dt2ms_tssfac_product": False}, 1.112e-6)):
+            with self.subTest(**kw):
+                _, engine = self._engine(**kw)
+                row = engine.split("/DT/NODA/CST/0", 1)[1].splitlines()[1]
+                tsca, tmin = row.split()
+                self.assertEqual(float(tsca), 0.9)
+                self.assertAlmostEqual(float(tmin), want, places=12)
 
     def test_positive_dt2ms_no_mass_scaling(self):
         # DT2MS >= 0 is init-only / no mass scaling -> no /DT/NODA/CST.

@@ -1064,6 +1064,208 @@ class DampingWarningTexts(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# K-20 - the three review minors (R14 round 10, B8; the census g2h's tests,
+# ported). PIN classes are green on ed52c93 and kill a mutant that survived
+# the damping modules (X09, X12); the SPEC classes were red on ed52c93.
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: a FLAT curve whose last abscissa is exactly t 0, and its one-point twin
+_FLAT0 = ((-0.001, 100.0), (0.0, 100.0))
+_ONE0 = ((0.0, 100.0),)
+#: two levels, the last one ending at 5 ms (the deck states no ENDTIM)
+_ENDS5 = ((0.0, 0.0), (1.0e-4, 100.0), (0.005, 100.0))
+#: a unit curve with one straight 4 ms edge
+_EDGE4 = ((0.0, 0.0), (0.004, 1.0), (1.0, 1.0))
+#: the review's st10 curve: 0 -> 38 -> 37 -> 1 within 0.1 ms, then 1
+_ST10 = ((0.0, 0.0), (1.0e-6, 38.0), (9.9e-5, 37.0), (1.0e-4, 1.0),
+         (0.02, 1.0))
+#: a unit step at 0.1 ms (its 0.1 ms edge: dose 1e-4 - one window)
+_STEP1 = ((0.0, 0.0), (1.0e-4, 1.0), (0.02, 1.0))
+
+
+class PinFlatCurveEndingAtTimeZero(unittest.TestCase):
+    """loads.py `held = len(plats) == 1 and pts[-1][0] >= 0.0`: mutant X09
+    ('>' for '>=') survived the repo's damping modules; these kill it. On
+    the census probe (nt 4) the cell decides between 13.6 % and 100 % of
+    the kinetic energy at 10 ms (flat0: KE/KE0 0.3676 / 0.2022 / 0.1356 at
+    5 / 8 / 10 ms = exp(-200 t); the mutant's bytes 1.0000)."""
+
+    def _check(self, pts):
+        res, s, _e = _convert(_deck(_curve(30, pts) + _part_mass(30)))
+        cards = _plain(s)
+        self.assertEqual(1, len(cards), cards)
+        alpha, _beta, _g, _skew, t0, t1 = cards[0]
+        self.assertEqual(("100", "0"), (alpha, t0))
+        self.assertGreaterEqual(float(t1), 1.0e29)
+        self.assertTrue(_has(res.warnings, "*DAMPING_PART_MASS (PID=1)",
+                             "ends at t 0, before ENDTIM=0.01",
+                             "HELD to the end of the run"), res.warnings)
+        self.assertFalse(_has(res.warnings, "is 0 over the whole run"))
+
+    def test_two_point_flat_curve_ending_at_t0_keeps_its_whole_run_card(self):
+        self._check(_FLAT0)
+
+    def test_one_point_curve_at_t0_keeps_its_whole_run_card(self):
+        self._check(_ONE0)
+
+
+class PinStopSentenceWithoutEndtim(unittest.TestCase):
+    """loads.py `ends_at = ... 0.0 < xn < endtim`: mutant X12
+    ('0.0 < xn < endtim < math.inf') dropped the 'stops there' sentence on
+    a deck without *CONTROL_TERMINATION; this kills it. The card is right
+    (census ends5: one window alpha 100, Tstop 0.005; 62 496 cycles to the
+    engine's t 1, KE/KE0 0.3724 from 5.004 ms on)."""
+
+    def test_the_last_level_stop_is_said_on_a_deck_without_endtim(self):
+        res, s, _e = _convert(_no_endtim(_deck(
+            _curve(30, _ENDS5) + _part_mass(30))))
+        self.assertEqual([("100", "0.005")],
+                         [(c[0], c[5]) for c in _plain(s)])
+        self.assertTrue(_has(res.warnings, "*DAMPING_PART_MASS (PID=1)",
+                             "Curve 30 ends at t 0.005",
+                             "stops there"), res.warnings)
+
+
+class NoInfInTheWindowText(unittest.TestCase):
+    """Minor 3 (SPEC, red on ed52c93): with no ENDTIM the text names the
+    end of the run k2rad writes (/RUN 1), never 'ENDTIM=inf'."""
+
+    def test_no_endtim_text_has_no_inf(self):
+        res, _s, e = _convert(_no_endtim(_deck(
+            _curve(30, _ENDS5) + _part_mass(30))))
+        self.assertIn("/RUN/cardstack_loads/1\n1\n", e)
+        own = [w for w in res.warnings if w.startswith("*DAMPING")]
+        self.assertTrue(own)
+        self.assertFalse([w for w in own if "=inf" in w or "inf]" in w],
+                         own)
+        self.assertTrue(_has(own, "the end of the run (no ENDTIM > 0 "
+                             "stated)"), own)
+
+    def test_the_global_zero_curve_without_endtim(self):
+        res, s, _e = _convert(_no_endtim(_deck(
+            _curve(30, ((0.0, 0.0), (1.0, 0.0))) + _global(30, 0.0))))
+        self.assertEqual([], _damp_cards(s))
+        self.assertTrue(_has(res.warnings, "curve 30 is 0 over the whole run "
+                             "[0, the end of the run (no ENDTIM > 0 "
+                             "stated)]"), res.warnings)
+
+
+class STiInTheEdgeBound(unittest.TestCase):
+    """Minor 1 (SPEC, red on ed52c93): the steepness bound is judged on the
+    direction alpha_i = SF x curve x ST_i, i.e. scale |SF| x max|ST_i| on a
+    FLAG 1 *DAMPING_PART_MASS (an all-zero ST row reads as uniform) and
+    max|ST_i| on a *DAMPING_GLOBAL with a non-zero ST row. MEASURED (census
+    g2h, nt 4 = nt 2): the review's FLAG 1 ST 10 probe written as one window
+    kept KE/KE0 0.8201 at 10 ms against the curve's 0.7617 (+7.67 %); the
+    /DAMP/FUNCT it now gets (the measured st10fix arm's bytes) 0.7641
+    (+0.32 %)."""
+
+    def test_part_mass_st_100_on_a_4_ms_edge_is_a_damp_funct(self):
+        """Hand: dose 100 x 1 x 0.004 = 0.4 > 0.04."""
+        _r, s, _e = _convert(_deck(
+            _curve(30, _EDGE4) + _part_mass(30, 1.0, 1,
+                                            (100, 100, 100, 0, 0, 0))))
+        self.assertEqual([], _plain(s))
+        f = _functs(s)
+        self.assertEqual(1, len(f), f)
+        self.assertEqual("1", f[0][2])
+        self.assertEqual(["100", "100", "100", "0", "0", "0"], f[0][3])
+
+    def test_the_reviews_st10_curve_is_a_damp_funct(self):
+        """Hand: dose 10 x 38 x 1e-4 = 0.038 > 0.005 (multi-point)."""
+        res, s, _e = _convert(_deck(
+            _curve(30, _ST10) + _part_mass(30, 1.0, 1,
+                                           (10, 10, 10, 0, 0, 0))))
+        self.assertEqual([], _plain(s))
+        self.assertEqual(["10", "10", "10", "0", "0", "0"],
+                         _functs(s)[0][3])
+        self.assertTrue(_has(res.warnings, "|SF| x max|ST_i| x (largest - "
+                             "smallest ordinate) x duration = 0.038 > 0.005"),
+                        res.warnings)
+
+    def test_global_st_100_on_a_4_ms_edge_is_a_damp_funct(self):
+        _r, s, _e = _convert(_deck(
+            _curve(30, _EDGE4) + _global(30, 0.0,
+                                         (100, 100, 100, 0, 0, 0))))
+        self.assertEqual([], _plain(s))
+        self.assertEqual(1, len(_functs(s)))
+
+    def test_unit_st_row_keeps_the_window(self):
+        """the guard: ST 1 (or an all-zero FLAG-1 row) leaves the bound at
+        |SF|, so the 4 ms unit edge stays one window (dose 0.004)."""
+        for st in ((1, 1, 1, 0, 0, 0), (0, 0, 0, 0, 0, 0)):
+            _r, s, _e = _convert(_deck(
+                _curve(30, _EDGE4) + _part_mass(30, 1.0, 1, st)))
+            self.assertEqual(1, len(_plain(s)), st)
+            self.assertEqual([], _functs(s), st)
+
+    def test_sf_times_st_moves_a_straight_edge_to_funct(self):
+        """Hand: dose 2 x 10 x 1 x 0.004 = 0.08 > 0.04."""
+        res, s, _e = _convert(_deck(
+            _curve(30, _EDGE4) + _part_mass(30, 2.0, 1,
+                                            (10, 10, 10, 0, 0, 0))))
+        self.assertEqual([], _plain(s))
+        f = _functs(s)
+        self.assertEqual(1, len(f), f)
+        self.assertEqual((30, "2", ["10", "10", "10", "0", "0", "0"]),
+                         (f[0][0], f[0][2], f[0][3]))
+        self.assertTrue(_has(res.warnings, "= 0.08 > 0.04"), res.warnings)
+
+
+class AlphaIInTheWindowText(unittest.TestCase):
+    """Minor 1, the sentence (round 10, B8): the windows sentence of a
+    per-direction card prints alpha_i (it printed the uniform alpha, e.g.
+    'alpha=2' on a card whose rows are 1 / 2 / 4)."""
+
+    @staticmethod
+    def _window_line(res):
+        w = [w for w in res.warnings if "written in TIME" in w]
+        assert len(w) == 1, res.warnings
+        return w[0]
+
+    def test_a_per_direction_window_names_alpha_i(self):
+        """Hand: SF 1 x level 1 x ST 2."""
+        res, s, _e = _convert(_deck(
+            _curve(30, _STEP1) + _part_mass(30, 1.0, 1, (2, 2, 2, 0, 0, 0))))
+        cards = _plain(s)
+        self.assertEqual(1, len(cards), cards)
+        self.assertEqual(("2", "0", "0", "5.000000E-05", "1.000000E+30"),
+                         (cards[0][0], cards[0][1], cards[0][3],
+                          cards[0][4], cards[0][5]))
+        w = self._window_line(res)
+        self.assertIn("alpha_i = SF x level x ST_i in the order x y z xx yy "
+                      "zz", w)
+        self.assertIn("alpha_i=2 / 2 / 2 / 0 / 0 / 0 for t 5E-05..end", w)
+
+    def test_sf_and_st_multiply_in_the_sentence(self):
+        """Hand: SF 2 x level 1 x (0.5, 1, 2) = 1 / 2 / 4."""
+        res, s, _e = _convert(_deck(
+            _curve(30, _STEP1) + _part_mass(30, 2.0, 1,
+                                            (0.5, 1, 2, 0, 0, 0))))
+        self.assertEqual("1", _plain(s)[0][0])
+        w = self._window_line(res)
+        self.assertIn("alpha_i=1 / 2 / 4 / 0 / 0 / 0", w)
+        self.assertNotIn("alpha=2 for t", w)
+
+    def test_global_window_names_alpha_i(self):
+        res, _s, _e = _convert(_deck(
+            _curve(30, _STEP1) + _global(30, 0.0, (2, 2, 2, 0, 0, 0))))
+        w = self._window_line(res)
+        self.assertIn("alpha_i = the level x ST_i", w)
+        self.assertIn("alpha_i=2 / 2 / 2 / 0 / 0 / 0", w)
+
+    def test_a_uniform_card_keeps_its_sentence(self):
+        """FLAG 0, SF 2 on the 4 ms edge: one window at the edge's midpoint
+        t 0.002, the earlier sentence."""
+        res, s, _e = _convert(_deck(_curve(30, _EDGE4) + _part_mass(30, 2.0)))
+        cards = _plain(s)
+        self.assertEqual(1, len(cards), cards)
+        self.assertEqual(("2", "0.002"), (cards[0][0], cards[0][4]))
+        self.assertIn("(alpha = SF x level): alpha=2 for t 0.002..end",
+                      self._window_line(res))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # K-20 - the opt-out restores today's bytes; untouched decks keep them
 # ═════════════════════════════════════════════════════════════════════════════
 
