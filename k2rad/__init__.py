@@ -1958,7 +1958,8 @@ def convert(
         cycle, fifths 1-4 unchanged, END moving both ways
         (ex_14_solid_elform_1 IE END -14.44 % at t 0.01839 -> -33.66 % at t
         0.02); a sliver remainder makes the last row an integration artifact
-        (metal-cutting KE 91.3 -> 6.06e8). Default True
+        (metal-cutting, ratio 0.05: KE 52.3 .. 111.0 -> 3.57e8 .. 6.06e8
+        over four runs at nt 4). Default True
         (``--no-implicit-end-fixpoint``: no card).
     implicit_rayleigh_damping : bool
         OPT-IN (R14 round 10, A6): on a dynamic implicit deck write
@@ -2002,9 +2003,13 @@ def convert(
         ``/EBCS/INLET/VP`` with the row's velocity, in place of the
         ``/IMPVEL`` of the covered nodes (R14 round 10, A7 1b): an
         ``/IMPVEL`` on an Eulerian ALE boundary admits no material
-        (``aflux3.F:488-524``). MEASURED on stagnation_A with the light fluid
-        (nt 4, n 500 LS times in (3.85e-5, 0.02]): KE RMS 53.09 -> 14.40 %,
-        the named cost IE RMS 172.71 -> 206.79 %. Refused by name beside a
+        (``aflux3.F:488-524``), where LS-DYNA's own face admits it (its water
+        group gains 0.995 x rho v A). MEASURED on stagnation_A with the light
+        fluid (nt 4, n 500 LS times in (3.85e-5, 0.02]): KE RMS 53.09 ->
+        14.40 %, the named cost IE RMS 172.71 -> 206.79 %; LS-DYNA lets the
+        fluid out at the open faces of its Eulerian mesh and OpenRadioss
+        closes them, so the fluid mass ends +71.65 % above LS-DYNA's (mass
+        RMS 35.53 % against 26.05 % with the /IMPVEL). Refused by name beside a
         LAW0 vacuum, for a time window, a non-/FUNCT curve or an unheld face
         node; ELFORM 5 / 6 (Lagrangian in k2rad) never reached. Default True
         (``--no-ale-inflow-ebcs``: the ``/IMPVEL``).

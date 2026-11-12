@@ -8641,9 +8641,10 @@ class ConvertOptions:
     # 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, LS-DYNA's
     # nodout); IE END +582.00 -> +53.91 % with this rule alone (RMS 393.31 ->
     # 81.05 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 =
-    # nt 2, 39 -> 35 cycles); the shipped default with --implicit-n2s-type7
-    # -0.78 .. -28.12 %, RMS 7.21 .. 15.26 % (125 runs at nt 4 and nt 2,
-    # three branches). solidof (a deformable-part clash) is byte identical.
+    # nt 2, 39 -> 35 cycles); the pre-round-10 default with
+    # --implicit-n2s-type7 -0.78 .. -28.12 %, RMS 7.21 .. 15.26 % (125 runs
+    # at nt 4 and nt 2, three branches; the round-10 bytes -21.37 .. -21.41 %
+    # in 12 runs). solidof (a deformable-part clash) is byte identical.
     rigid_part_pid_precedence: bool = True
     # --no-implicit-n2s-type7: an implicit *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE
     # stays an /INTER/TYPE25 (the 386444e bytes).
@@ -9250,8 +9251,10 @@ class ConvertOptions:
     # p.41-104 Remark 13), ELFORM 2/3/16 and the tets (no hourglass modes), ALE,
     # a *MAT_NULL fluid (kept VISCOUS, Isolid 1, p.25-3 Remark 4), /MAT/LAW115
     # sections (their own measured 17 → 24) and any deck carrying
-    # *INITIAL_STRESS_SECTION (Isolid 1/2 = zero-or-negative volume at cycle 0
-    # under /PRELOAD Itype=2).
+    # *INITIAL_STRESS_SECTION (under /PRELOAD Itype=2 Isolid 1/2 hold the
+    # preload during the hold and then
+    # lose the cut element to ZERO OR NEGATIVE VOLUME -
+    # writer/preload._PRELOAD_STABLE_ISOLID, round 10 B9).
     # Set False (--no-default-hourglass) to keep the pre-2026-09 behaviour, in
     # which a defaulted deck gets full integration and NO hourglass control.
     default_hourglass: bool = True
@@ -9622,7 +9625,8 @@ class ConvertOptions:
     # 5 models that ended NORMAL below ENDTIM reach it at +1 cycle with
     # fifths 1-4 unchanged; END moves both ways (ex_14_solid_elform_1 IE END
     # -14.44 % at t 0.01839 -> -33.66 % at t 0.02); a sliver remainder makes
-    # the last row an artifact (metal-cutting KE 91.3 -> 6.06e8). 21 keys /
+    # the last row an artifact (metal-cutting, ratio 0.05: KE 52.3 .. 111.0
+    # -> 3.57e8 .. 6.06e8 over four runs at nt 4). 21 keys /
     # 16 models move by the two lines. False = no card (ed52c93).
     implicit_end_fixpoint: bool = True
     # --implicit-rayleigh-damping (A6, OPT-IN; writer/assembly
@@ -10794,6 +10798,13 @@ class ConversionState:
     # written (writer/assembly._warn_ls_default_tssfac; once per deck, an
     # --imflag-curve-restart chain builds several engine files).
     ls_tssfac_named: bool = False
+    # R14 round 10, verification round (findings 6.32 (2)(f)): the shell
+    # properties the SHRF rule (A1, /PROP/SHELL only) does not reach -
+    # (label, id, property kind, the deck's SHRF, LS-DYNA's factor) recorded
+    # by their emitters, named once per deck by writer/mesh
+    # ._warn_shrf_other_routes. Text only.
+    shrf_other_routes: List[Tuple[str, int, str, float, float]] = field(
+        default_factory=list)
     # R14 round 10, A8: the Stmin cell each /INTER/TYPE7 was WRITTEN with
     # (writer/contacts._emit_inter_type7), so the K-02 floor sentence reads
     # the card's own value and never claims 1000 where the rigid-tool cap

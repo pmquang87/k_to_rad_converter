@@ -1892,7 +1892,10 @@ class SurfatypAllParts(unittest.TestCase):
     *SET_PART) the explicit all-parts /INTER/TYPE25 over the other parts; an
     implicit 6, a missing or all-exempting set and SURFATYP 7 are dropped by
     name. ONE predicate, writer/common.single_surface_scope, decides the
-    route at every site. The deck: part 1 = the block (solid), 101 / 102 =
+    route at every site of the single-surface record (the eroding
+    *CONTACT_ERODING_SINGLE_SURFACE is another record type with its own
+    SSID = 0 / SURFATYP 5 expansion: test_r14_round10_verify.
+    ErodingRouteScope). The deck: part 1 = the block (solid), 101 / 102 =
     the cards; part set 1 = {101, 102}, part set 2 = {1}."""
 
     def test_surfatyp_5_writes_the_ssid_0_bytes(self):

@@ -1091,7 +1091,8 @@ class ShrfNote(unittest.TestCase):
         self.assertEqual(len(notes), 1, notes)
         self.assertTrue(notes[0].startswith(
             "*SECTION_SHELL 1 (ELFORM 15): SHRF is NOT written to the "
-            "/PROP/SHELL Ashear cell (it stays 0, the starter's 5/6)"),
+            "/PROP/SHELL Ashear cell (it stays 0: the starter's 5/6, or 0 "
+            "on an N-1 property)"),
             notes[0])
 
     def test_a_stated_1_and_a_blank_write_the_same_bytes(self):

@@ -59,6 +59,7 @@ from .mesh import (
     _snap_tet10_midsides,
     _synthesize_beam_orientation_nodes,
     _synthesize_vector_skews,
+    _warn_shrf_other_routes,
 )
 from .composites import (
     _assign_composite_props,
@@ -1730,9 +1731,13 @@ def _implicit_end_fixpoint(state: ConversionState, dyn, seg) -> List[str]:
             "When the remainder is a sliver of the step the last increment "
             "is cut to it (imp_dt.F:311-320) and the LAST row is an "
             "integration artifact - measured on efg/metal-cutting/main.k "
-            "(step 2.0e-4 cut to 1.0e-5: KE 91.3 -> 6.06e8, ERROR 99.9 % at "
-            "t 0.03) and on a 2 x 2 x 2-hex probe (2.0e-3 cut to 1.05e-4: KE "
-            "0.160 -> 170.1, ERROR -99.9 %): read the row before it.")
+            "(step 2.0e-4 cut to 1.0e-5, ratio 0.05: the last row's KE 52.3 "
+            ".. 111.0 -> 3.57e8 .. 6.06e8 and ERROR 99.9 % at t 0.03 over "
+            "four runs of the same bytes at nt 4 - the listing does not "
+            "repeat digit for digit), on a 2 x 2 x 2-hex probe (2.0e-3 cut "
+            "to 1.05e-4, ratio 0.06: KE 0.160 -> 170.1, ERROR -99.9 %) and on "
+            "that probe with ENDTIM 0.0201 (ratio 0.115: KE 0.160 -> 37.16): "
+            "read the row before it.")
     return ["/IMPL/DT/FIXPOINT", _f(t_end)]
 
 
@@ -3462,6 +3467,10 @@ def _starter_section_registry():
         ("properties",        lambda c: _make_properties(c.state)),
         ("composite_properties", lambda c: _emit_composite_props(c.state)),
         ("fabric_properties",    lambda c: _emit_fabric_props(c.state)),
+        # R14 round 10, verification round: the shell routes the SHRF rule
+        # does not reach (/PROP/TYPE9 / TYPE11 / TYPE51), named once per
+        # deck after every property is written. Writes no line, draws no id.
+        ("shrf_other_routes",    lambda c: _warn_shrf_other_routes(c.state)),
         ("seatbelt_2d_properties",
                                  lambda c: _emit_seatbelt_2d_props(c.state)),
         ("functions",         lambda c: _make_functions(c.state)),
@@ -3773,9 +3782,11 @@ def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
     the only thing being carried across; a TSSFAC < 0 curve is named
     (_tssfac_curve_sentence), not converted.
 
-    Only emitted when TSSFAC > 0. TSSFAC = 0 is LS-DYNA's "use my default"
-    (0.9), which is also OpenRadioss's /DT default, so there is nothing to
-    carry and the deck is left exactly as it converted before.
+    Only emitted when TSSFAC > 0. A blank TSSFAC is LS-DYNA's "use my
+    default", which is 0.9 - also OpenRadioss's /DT default, nothing to
+    carry - on a Remark 1 c deck only (Vol I R17 p.12-589): where Remark 1 a
+    / b makes it 0.667 / 0.333, k2rad still writes no /DT and names the
+    substitution (:func:`_warn_ls_default_tssfac`).
 
     DT2MS > 0 is NOT "no mass scaling": it is LS-DYNA's step of a
     mass-scaled solution for quasi-static or time-history runs (Vol I R17
@@ -3939,26 +3950,44 @@ def _warn_ls_default_tssfac(state: ConversionState) -> None:
     writes no ``/DT`` scale factor, so OpenRadioss steps at its own default
     0.9 (0.67 on a routed 2-D deck, ``contrl.F:1148-1149``). Owned by the
     keyword that sets the class. TEXT ONLY: writing the 0.667 / 0.333 would
-    move the step by 1.35x - 2.7x and no run measures it (ROADMAP, round
-    10's NOT list, entry 6)."""
+    move the step by 1.35x - 2.70x and no run measures it (ROADMAP, round
+    10's NOT list, entry 6). Silent where OpenRadioss's own default equals
+    LS-DYNA's to the printed digit (a routed 2-D deck's 0.67 against a
+    0.667 class: 1.00x, nothing substituted). Under a deletion floor
+    (``--dt-del``) the ``/DT .../DEL`` card carries Tsca 0.9 (0.67 on
+    ``/DT/QUAD/DEL``) - k2rad's choice for a blank TSSFAC, the same factor
+    - and the sentence says so (verification round)."""
     if state.ls_tssfac_named or _engine_implicit(state):
         return
     hit = ls_tssfac_unconverted(state)
     if hit is None:
         return
-    state.ls_tssfac_named = True
     v, kw, rule = hit
     ts = state.ctrl_timestep
     routed = axisym_routed(state)
     orv = 0.67 if routed else 0.9
+    if f"{orv / v:.2f}" == "1.00":
+        return
+    state.ls_tssfac_named = True
     where = ("the deck has no *CONTROL_TIMESTEP card" if ts is None else
              "*CONTROL_TIMESTEP TSSFAC is blank")
+    tmin, source = _dt_deletion_floor(state)
+    if tmin is None:
+        how = ("k2rad writes no /DT scale factor here, so OpenRadioss steps "
+               f"at its own default {orv:g}"
+               f"{' on a 2-D deck' if routed else ''} (contrl.F:1148-1149)")
+    else:
+        card = (0.67 if routed and (state.options.dt_del or 0.0) > 0.0
+                else 0.9)
+        how = (f"the /DT .../DEL card of the deletion floor ({source}) "
+               f"carries Tsca {card:g}, k2rad's choice for a blank TSSFAC, "
+               f"and OpenRadioss steps at {orv:g}"
+               f"{' on a 2-D deck' if routed else ''}, its own default too "
+               "(contrl.F:1148-1149)")
     state.warn(
         f"{kw} sets LS-DYNA's default time-step scale factor on this deck: "
         f"{where}, so LS-DYNA steps at TSSFAC = {v:g} ({_REMARK1} {rule}). "
-        "k2rad writes no /DT scale factor here, so OpenRadioss steps at its "
-        f"own default {orv:g}{' on a 2-D deck' if routed else ''} "
-        f"(contrl.F:1148-1149) - {orv / v:.2f}x LS-DYNA's factor, a larger "
+        f"{how} - {orv / v:.2f}x LS-DYNA's factor, a larger "
         "explicit step and fewer cycles. Not converted: Tsca "
         f"{v:g} would change the step and the cycle count by that factor "
         "and no run has measured it (ROADMAP, round 10's NOT list, entry 6). "
@@ -4095,6 +4124,23 @@ def _dt2ms_step_clause(state: ConversionState, ts, tssfac: float,
 _DT_DEL_KINDS = ("SHELL", "SH_3N", "BRICK")
 
 
+def _dt_deletion_floor(state: ConversionState) -> Tuple[Optional[float], str]:
+    """``(Tmin, source)`` of the ``/DT/<elem>/DEL`` deletion floor this deck
+    gets, else ``(None, "")``: ``--dt-del`` first, then (only under
+    ``--no-erode-tsmin-rule``) ``ERODE=1`` with ``TSLIMT>0``. The ONE
+    decision :func:`_make_engine_dt_deletion` writes and the conditional
+    TSSFAC sentence (:func:`_warn_ls_default_tssfac`) reads."""
+    ts = state.ctrl_timestep
+    explicit = state.options.dt_del
+    if explicit is not None and explicit > 0.0:
+        return float(explicit), f"--dt-del {float(explicit):g}"
+    if (not state.options.erode_tsmin_rule and ts is not None
+            and int(ts.erode) == 1 and ts.tslimt > 0.0):
+        return (float(ts.tslimt),
+                f"*CONTROL_TIMESTEP ERODE=1 TSLIMT={ts.tslimt:g}")
+    return None, ""
+
+
 def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     """``/DT/<elem>/DEL`` — delete an element whose time step reaches Tmin.
 
@@ -4152,15 +4198,7 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     # R14 round 10, A11 (default ON, --no-erode-tsmin-rule restores the
     # ed52c93 trigger): ERODE 1 + TSLIMT > 0 is no deletion floor
     legacy = not state.options.erode_tsmin_rule
-    tmin = None
-    source = ""
-    if explicit is not None and explicit > 0.0:
-        tmin = float(explicit)
-        source = f"--dt-del {tmin:g}"
-    elif (legacy and ts is not None and int(ts.erode) == 1
-          and ts.tslimt > 0.0):
-        tmin = float(ts.tslimt)
-        source = f"*CONTROL_TIMESTEP ERODE=1 TSLIMT={ts.tslimt:g}"
+    tmin, source = _dt_deletion_floor(state)
     if not legacy and ts is not None:
         _note_erode_tslimt(state, ts)
 

@@ -1521,7 +1521,8 @@ class ConverterGUI:
                 row=97, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(
             io, text="ALE inflow: /EBCS/INLET/VP, not /IMPVEL - ON. "
-                     "stagnation KE RMS 53.09 -> 14.40 %",
+                     "stagnation KE RMS 53.09 -> 14.40 %; no outflow: fluid "
+                     "mass +71.65 % at the end",
             variable=self.ale_inflow_ebcs).grid(
                 row=98, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(

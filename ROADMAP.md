@@ -3577,10 +3577,12 @@ as N keys / M models on the 356-key / 312-model roster.
     69x-210x the floor); round-9 entry 19's "why the full-length IE falls
     away" (the time-converged OR plate peaks at t 0.0114 against LS's 0.0123
     and is undamped; the base's match is the step growth); the `/PRELOAD`
-    stable set (holds on clamped bars; B9); J4's bytes (the cap stays; B10);
-    the 0.35 residues (implicit scatter; the union bands of report §0.36);
+    stable set (holds on clamped bars; B9); the 0.35 residues (implicit
+    scatter; the union bands of report §0.36);
     the ex_27 pair (ENGINE), 4.1 (SOLVER), ex_05 (SOLVER x REFERENCE) as
-    records in 21.
+    records in 21. (The K-04 cap, listed here until the verification round,
+    is RE-OPENED for round 11: on the round-10 bytes lifting it improves
+    every `bend.k` channel - its bullet under 'Opened by the batch'.)
 34. **The end fix point's last-row sliver** (new; A5's own record): `IMP_DTF`
     cuts the last step to the remainder whatever its size
     (`imp_dt.F:311-320`), so where the remainder is a sliver of the step the
@@ -4766,14 +4768,21 @@ recipe's section 17 lists all nine). The four that concern k2rad:
   default route and under `--auto-gapmin`, the same bytes) engages at a
   mid-plane height of 0.1009 mm, 0.075 mm inside LS-DYNA's T = 0.175 (Vol I R17
   p.11-128/129 General Remark 12), and with `--inter-gapmin 12=0.175` at 0.1760
-  mm (2770 cycles both; WARNING 94 informational). On the roster the unclamped
-  T is not better: `bend.k` (the default route's one clamped key, Gapmin 0.127
-  -> 0.1905 by one cell) IE RMS 1.36 -> 0.85 % of the LS peak but KE END -45.60
-  -> -83.08 % (MIXED; LS runs it with `*CONTROL_ADAPTIVE`, which k2rad skips),
-  and `adpips.k` (a match row, the cap 6.152 -> T 10) IE RMS 2.61 -> 3.37 %, KE
-  RMS 1.06 -> 1.32 % (still a match). The cap stays. Reach: 5 R14 keys / 5
-  models cap below T under `--auto-gapmin`, 1 / 1 (`bend.k`) on the default
-  route. **Round 10:** closed by measurement (B10).
+  mm (2770 cycles both; WARNING 94 informational). On the roster, measured on
+  the `ed52c93` bytes, the unclamped T was not better: `bend.k` (the default
+  route's one clamped key, Gapmin 0.127 -> 0.1905 by one cell) IE RMS 1.36 ->
+  0.85 % of the LS peak, KE RMS 8.91 -> 7.54 %, but KE END -45.60 -> -83.08 %
+  (MIXED; LS runs it with `*CONTROL_ADAPTIVE`, which k2rad skips), and
+  `adpips.k` (a match row, the cap 6.152 -> T 10) IE RMS 2.61 -> 3.37 %, KE
+  RMS 1.06 -> 1.32 % (still a match). On the round-10 bytes (A1 writes
+  `bend.k`'s Ashear cell; decks `201658af` / `8de28f06`, the verification
+  round's own runs, nt 4, n 500) lifting the cap improves every channel: IE
+  RMS 1.30 -> 0.79 %, KE RMS 9.40 -> 7.89 %, IE END -1.70 -> -0.52 %, KE END
+  -30.36 -> -6.83 % (`adpips.k` not re-measured on these bytes). The cap stays.
+  (In round 10: one roster key at one nt does not flip a default.) Reach: 5
+  R14 keys / 5 models cap below T under `--auto-gapmin`, 1 / 1 (`bend.k`) on
+  the default route. **Round 10:** RE-OPENED for round 11 (the verification
+  round's head-byte arms; B10 had closed it on the `ed52c93` bytes).
 - **`--soften-stfac` does not reach the `*_TIEBREAK` post-rupture companion
   `/INTER/TYPE25`** (measured Stfac 0 under 0.3; the help says so). Passing
   the override there would change it; then the help, the GUI label and the

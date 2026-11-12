@@ -414,8 +414,15 @@ as underscores.
   0.01839 -> -33.66 % at t 0.02; `ex_11_beam_elform_1` KE END +1343.37 ->
   -78.46 %). When the remainder is a sliver of the step the last increment is
   cut to it (`imp_dt.F:311-320`) and the LAST row is an integration artifact
-  (`efg/metal-cutting/main.k`: step 2.0e-4 cut to 1.0e-5, KE 91.3 -> 6.06e8,
-  ERROR 99.9 % at t 0.03): read the row before it.
+  (`efg/metal-cutting/main.k`: step 2.0e-4 cut to 1.0e-5, a remaining-step
+  ratio of 0.05 - the last row's KE 52.3 .. 111.0 -> 3.57e8 .. 6.06e8 and
+  ERROR 99.9 % at t 0.03 over four runs of the same bytes at nt 4 (the A-i
+  spec 91.3 -> 6.06e8, the A-i implementation 111.0 -> 5.52e8, the campaign's
+  0.36 run 60.77 -> 4.562e8, the physics-A verifier 52.26 -> 3.565e8: the
+  listing does not repeat digit for digit); a hex probe at ratio 0.06: KE
+  0.160 -> 170.1, at ratio 0.115: 0.160 -> 37.16): read the row before it.
+  No scored R14 row is affected today: the lowest ratio among the 14 implicit
+  rows with a match / deviation verdict is 0.622 (report section 0.36.2).
   `--no-implicit-end-fixpoint` writes no card.
 - `--implicit-rayleigh-damping` — **OFF by default** (opt-in). On a dynamic
   implicit deck write `*DAMPING_GLOBAL` (LCID 0, uniform STX .. SRZ) as
@@ -500,15 +507,19 @@ as underscores.
   `*CONTACT_SURFACE_TO_SURFACE` (20 R14 keys with a rigid main), MORTAR and a
   deformable tool (the ring trio). MEASURED (nt 4, each deck's part-A-i bytes
   and the capped bytes in one window, 4 R14 keys / 12 cells): pan.drawbead.31
-  IE RMS 10.85 -> 4.01 %, KE RMS 14.24 -> 10.86 % (n 61), contact-1 force
-  RMS 448.66 -> 41.68 % of LS's peak - its first two IE fifths are worse
+  IE RMS 10.85 -> 4.01 %, KE RMS 14.24 -> 10.86 % (n 61), the punch
+  contact's total force |FN + FT| - the like-for-like of LS-DYNA's rcforc
+  resultant - RMS 474.43 -> 46.72 % of LS's peak (its normal force FN alone
+  448.56 -> 41.63 %, the binder 92.00 -> 92.21 %, the die 441.24 -> 44.16 %,
+  all |FN + FT|) - its first two IE fifths are worse
   (-13.33 / -82.43 -> -96.70 / -99.15 %) and its ERROR column hits the
   -99.9 % print clamp on 569 of 2511 rows (the column leaves out the contact
   energy) - see below; the anisotropic cup-draw IE RMS 5.57 -> 3.43 % (n 150) at a KE
   cost, END -42.14 -> -49.31 %, KE RMS 29.17 -> 28.83 %, holder force RMS
   129.70 -> 92.39 %; hemi.draw IE RMS 1.25 -> 0.99 %, KE RMS 39.60 ->
   36.19 % (n 120); control_adaptive.cup-draw IE RMS 12.86 -> 13.02 % (n 699),
-  contact-1 force RMS 12.92 -> 13.66 %. The coupon `tests/fixtures/round10/r10_type7_coupon_quad.k` puts eq.
+  its three contact forces |FN + FT| 13.49 / 15.40 / 20.79 -> 14.34 / 15.62 /
+  22.16 % (all worse). The coupon `tests/fixtures/round10/r10_type7_coupon_quad.k` puts eq.
   30.8's node spring into the engine exactly (peak penetration 0.18031 mm =
   the closed form). `--no-rigid-tool-penalty-cap` writes Stmax 0.
   **pan.drawbead.31 under the skill launcher's strict audit** (the default
@@ -523,8 +534,9 @@ as underscores.
   external work is unaccounted at END against 8.2 %, while the absolute
   residual falls 2.546e6 -> 1.720e6. Against the `ed52c93` bytes (A1 + A8 on
   this deck, n 61, nt 4) every LS-DYNA channel improves: IE RMS 10.94 ->
-  4.01 %, KE RMS 14.28 -> 10.86 %, the punch / die force RMS 473.84 -> 46.72
-  % and 440.84 -> 44.16 % of the LS peaks. Two ways out: the launcher's
+  4.01 %, KE RMS 14.28 -> 10.86 %, the punch / die total force |FN + FT| RMS
+  473.84 -> 46.72 % and 440.84 -> 44.16 % of the LS peaks (the binder 92.01 ->
+  92.21 %). Two ways out: the launcher's
   `-Advisory` runs the deck and keeps that gain; `--no-rigid-tool-penalty-cap`
   writes the earlier bytes (no flag) and gives the gain up. Measured over the
   roster after the round-10 re-runs: the strict default would refuse 43 of
@@ -5000,7 +5012,8 @@ preload group: thick shells in the cut (they ride in the solid list so the
 reporting section still sees them, but no thick-shell initialiser calls
 `SBOLTINI`, and LS-DYNA lists solid types only, Vol I R17 p.3145 Remark 4).
 Warned + emitted: a preloaded part whose `/PROP/SOLID` is not `Isolid` 5, 14 or 17
-(1 and 2 hit negative volume at cycle 0, 12 is a silent no-op, 24 diverges),
+(1 and 2 hold the preload during the hold and then lose the cut element to
+ZERO OR NEGATIVE VOLUME, 12 is a silent no-op, 24 diverges),
 6-node PENTAs *spelled with blank cells 7-8 in an element that is emitted as a
 `/BRICK`* — the only combination the starter classifies `ISOLNOD=6`, where it
 either refuses the deck (`ERROR 3107` at any `Isolid` but 24, `initia.F:1081`) or
@@ -6938,10 +6951,12 @@ ways (`ex_14_solid_elform_1` IE END -14.44 % at t 0.01839 -> -33.66 % at t
 0.02; `ex_11_beam_elform_1` KE END +1343.37 -> -78.46 %). When the remainder
 is a sliver of the step, the last increment is cut to it (`imp_dt.F:311-320`)
 and the LAST printed row is an integration artifact: `efg/metal-cutting/main.k`
-(step 2.0e-4 cut to 1.0e-5) prints KE 91.3 -> 6.06e8 and ERROR 99.9 % at t
-0.03, a 2 x 2 x 2-hex probe (2.0e-3 cut to 1.05e-4) KE 0.160 -> 170.1 and
-ERROR -99.9 % - read the row before it. 21 R14 keys / 16 models move by the
-two engine lines.
+(step 2.0e-4 cut to 1.0e-5, ratio 0.05) prints a last-row KE of 3.57e8 ..
+6.06e8 after 52.3 .. 111.0 and ERROR 99.9 % at t 0.03 over four runs of the
+same bytes at nt 4, a 2 x 2 x 2-hex probe (2.0e-3 cut to 1.05e-4, ratio 0.06)
+KE 0.160 -> 170.1 and ERROR -99.9 %, the probe with ENDTIM 0.0201 (ratio
+0.115) KE 0.160 -> 37.16 - read the row before it. 21 R14 keys / 16 models
+move by the two engine lines.
 `/IMPL/QSTAT/DTSCAL` is **10 since 2026-09**, changed from 0.1
 (`--qstat-dtscal VALUE|none` to override, `--qstat-dtscal 0.1` to restore).
 That cell scales the inertia stabilization k2rad adds to the implicit tangent:
@@ -7115,7 +7130,11 @@ otherwise; the warning says which (R14 round 10, A11: it used to name
 `TSLIMT`, which is LS-DYNA's shell modulus floor, not a stop field). A
 `TSSFAC` < 0 load curve is named with its range over 0 .. ENDTIM, not
 converted (`/DT` has no curve input, `freform.F:1033-1043`).
-`TSSFAC`=0 emits nothing (LS-DYNA's default 0.9 is also the `/DT` default).
+`TSSFAC`=0 emits nothing: LS-DYNA's default is then 0.9 - also the `/DT`
+default - on a Remark 1 c deck only (Vol I R17 p.12-589); where Remark 1 a / b
+makes it 0.667 / 0.333 (a contact beside `*CONTROL_CONTACT` SLSFAC >= 1,
+`*INITIAL_DETONATION`, `*BOUNDARY_NON_REFLECTING`) the conditional-TSSFAC
+sentence names the substitution.
 `DT2MS` > 0 is LS-DYNA mass scaling too (the step of a mass-scaled
 quasi-static or time-history solution, Vol I R17 p.12-585); k2rad does not
 convert it on a 3-D deck (ROADMAP, round 9's NOT list, entry 5) and says so,

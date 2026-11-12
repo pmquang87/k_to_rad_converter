@@ -189,7 +189,8 @@ class A1ShrfAshear(unittest.TestCase):
                 self.assertEqual(len(notes), 1, notes)
                 self.assertTrue(notes[0].startswith(
                     f"*SECTION_SHELL 1 ({label}): SHRF is NOT written to the "
-                    "/PROP/SHELL Ashear cell (it stays 0, the starter's 5/6)"),
+                    "/PROP/SHELL Ashear cell (it stays 0: the starter's 5/6, "
+                    "or 0 on an N-1 property)"),
                     notes)
                 for needle in ("p.41-66", "hm_read_prop01.F:246-259",
                                "p.41-67"):
@@ -921,8 +922,9 @@ _REPLACEMENTS_ROUND_10_A = (
     ("k2rad/writer/mesh.py",
      "is NOT carried to the /PROP/SHELL Ashear cell (--no-shrf-ashear)"),
     ("k2rad/writer/mesh.py",
-     "SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0, the "
-     "starter's 5/6): NIP 1 is one point with no bending"),
+     "SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0: the "
+     "starter's 5/6, or 0 on an N-1 property): NIP 1 is one point with no "
+     "bending"),
     # (a comment needle is cut at its comment line's end: the guard keeps #)
     ("k2rad/state.py",
      "--no-shrf-ashear): written to the /PROP/SHELL Ashear cell by the rule"),
@@ -2885,10 +2887,16 @@ class Round10RoadmapRecord(unittest.TestCase):
         bullet = _t7._collapse("\n".join(self.lines[a:b]))
         for needle in ("0.1009 mm", "0.1760 mm", "1.36 -> 0.85 %",
                        "-45.60 -> -83.08 %", "2.61 -> 3.37 %",
-                       "The cap stays."):
+                       "The cap stays.",
+                       # the verification round: the head bytes' arms
+                       "measured on the `ed52c93` bytes",
+                       "IE RMS 1.30 -> 0.79 %", "KE RMS 9.40 -> 7.89 %",
+                       "KE END -30.36 -> -6.83 %",
+                       "**Round 10:** RE-OPENED for round 11"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, bullet)
         self.assertNotIn("No engine run measures that case", bullet)
+        self.assertNotIn("closed by measurement", bullet)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

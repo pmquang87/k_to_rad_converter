@@ -5448,14 +5448,17 @@ _A8_MEASURED = (
     "MEASURED (nt 4, LS-DYNA glstat, README 9.1; each deck's part-A-i bytes "
     "and the capped bytes in one window): pan.drawbead IE RMS 10.85 -> "
     "4.01 %, KE RMS 14.24 -> 10.86 % (n 61, t in (1.365e-4, 8.386e-3]), "
-    "contact-1 force RMS 448.66 -> 41.68 % of LS's peak, with its first two "
+    "the punch contact's total force |FN + FT| (the like-for-like of "
+    "LS-DYNA's rcforc resultant) RMS 474.43 -> 46.72 % of LS's peak (its "
+    "normal force FN alone 448.56 -> 41.63 %), with its first two "
     "IE fifths worse (-13.33 / -82.43 -> -96.70 / -99.15 %); "
     "mat_transversely_anisotropic.cup-draw IE RMS 5.57 -> 3.43 % (n 150) "
     "with a named COST on the KE: END -42.14 -> -49.31 % (fifths -75.33 / "
     "+204.60 / +10.76 / -54.21 / -42.14 -> -55.00 / +11.60 / +10.55 / "
     "-58.45 / -49.31), KE RMS 29.17 -> 28.83 %; hemi.draw IE RMS 1.25 -> "
     "0.99 %, KE RMS 39.60 -> 36.19 % (n 120); control_adaptive.cup-draw IE "
-    "RMS 12.86 -> 13.02 % (n 699), contact-1 force RMS 12.92 -> 13.66 %.")
+    "RMS 12.86 -> 13.02 % (n 699), its three contact forces |FN + FT| "
+    "13.49 / 15.40 / 20.79 -> 14.34 / 15.62 / 22.16 % (all three worse).")
 
 
 class _ToolCap(NamedTuple):
@@ -7134,8 +7137,15 @@ def _solid_pids_by_part(state: ConversionState) -> Dict[int, int]:
 
 def _type25_surface(state: ConversionState, c, sid: int, styp: int,
                     tag: str, out_lines: List[str],
-                    sid_zero_is_all_parts: bool = False) -> int:
+                    sid_zero_is_all_parts: bool = False,
+                    written_pids: Optional[Set[int]] = None) -> int:
     """Emit one side's /SURF for a TYPE25 contact and return its id (0 = none).
+
+    *written_pids* (R14 round 10, verification round): when given, it gains
+    the parts of a part-scoped surface this call WRITES - so a caller names
+    what the interface really holds (a SURFATYP 5 side expands to every part
+    here, whatever its SSID says); a *SET_SEGMENT / *SET_SHELL side adds
+    nothing (it names segments, not parts).
 
     The whole point of the eroding batch lives here: for an ``*CONTACT_ERODING_*``
     whose side resolves to SOLID parts, the surface is built with ``/SURF/PART/
@@ -7235,6 +7245,8 @@ def _type25_surface(state: ConversionState, c, sid: int, styp: int,
     if not _make_master_surface(state, surf_id, tag, sorted(pids), out_lines,
                                 solid_all=solid_all):
         return 0
+    if written_pids is not None:
+        written_pids.update(pids)
     return surf_id
 
 
@@ -7353,12 +7365,16 @@ def n2s_routed(state: ConversionState, c) -> bool:
 #: -0.1922 mm on the TYPE25, at t 1.0.
 _N2S_TYPE7_MEASURED = (
     "MEASURED on implicit/basic-examples/springback-i/doorbeam.k with the "
-    "part drive: internal energy END -0.78 .. -28.12 % against LS-DYNA, RMS "
+    "part drive, on the pre-round-10 bytes: internal energy END -0.78 .. "
+    "-28.12 % against LS-DYNA, RMS "
     "7.21 .. 15.26 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], "
     "in 125 runs of the same bytes at nt 4 and nt 2 - the route scatters run "
     "to run on three branches: 102 runs at -27.76 .. -28.12 %, 21 at -15.85 "
     ".. -16.27 % (both at nt 4 and nt 2) and two single nt-4 runs nearer LS "
-    "(-8.36 %, -0.78 %) - where the TYPE25 ended +53.91 % / RMS 81.05 %. "
+    "(-8.36 %, -0.78 %) - where the TYPE25 ended +53.91 % / RMS 81.05 %. On "
+    "the round-10 bytes (the SHRF rule writes doorbeam's two Ashear cells) "
+    "12 runs at nt 4 and nt 2 end at -21.37 .. -21.41 % (RMS 14.67 .. 14.69 "
+    "%): no second branch is seen in them, which does not exclude one. "
     "CHECK THAT THE CONTACT CARRIES LOAD - with four contact nodes on a "
     "coarse RIGID base the outcome depends on the geometry: on one two-block "
     "coupon this route ends NORMAL TERMINATION with the block through the "
@@ -7625,15 +7641,35 @@ def _make_type25_interfaces(state: ConversionState,
         else:
             single = c.variant == "SINGLE_SURFACE"
             tag = ("self" if single else "secnd")
+            # K-16's Ishape scope: an SSID = 0 single surface is every part;
+            # a SURFATYP 5 card with a stated SSID is not counted here (the
+            # surface below expands it) - an emitted cell, kept as it is
+            # (ROADMAP: a round-11 question)
             ish_pids = (set(state.parts) if single and c.ssid == 0 else   # K-16
                         _contact_master_pids(state, c.ssid, c.sstyp)
                         | _contact_master_pids(state, c.msid, c.mstyp))
-            law_pids = ish_pids                     # round 10, B6
+            # round 10, B6 (verification round): the parts of the surfaces
+            # this interface really WRITES (this record type keeps its own
+            # SSID = 0 / SURFATYP 5 expansion in _type25_surface; it is not a
+            # state.contacts_single record, so writer/common.single_surface_
+            # scope does not decide it)
+            written: Set[int] = set()
             # Only a SINGLE_SURFACE reads SSID=0 as "all parts" (Vol I p.11-24).
             surf1 = _type25_surface(state, c, c.ssid, c.sstyp,
                                     f"contact_{c.inter_id}_{tag}", lines,
-                                    sid_zero_is_all_parts=single)
+                                    sid_zero_is_all_parts=single,
+                                    written_pids=written)
             if not surf1:
+                if c.sstyp in (6, 7):
+                    # the type's meaning, not the false "names no part"
+                    _drop_interface(
+                        state, dropped, kw, c.inter_id,
+                        f"the SECONDARY (SSID) side ssid={c.ssid}: "
+                        + _styp567_clause(c.ssid, c.sstyp)
+                        + " - the eroding /INTER/TYPE25 route builds its "
+                        "surface from a part, a part set or SURFATYP 5 only",
+                        _styp567_remedy(c.ssid, c.sstyp))
+                    continue
                 _drop_interface(
                     state, dropped, kw, c.inter_id,
                     f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
@@ -7646,8 +7682,19 @@ def _make_type25_interfaces(state: ConversionState,
                 continue
             if c.variant == "SURFACE_TO_SURFACE":
                 surf2 = _type25_surface(state, c, c.msid, c.mstyp,
-                                        f"contact_{c.inter_id}_main", lines)
+                                        f"contact_{c.inter_id}_main", lines,
+                                        written_pids=written)
                 if not surf2:
+                    if c.mstyp in (6, 7):
+                        _drop_interface(
+                            state, dropped, kw, c.inter_id,
+                            f"the MAIN (MSID) side msid={c.msid}: "
+                            + _styp567_clause(c.msid, c.mstyp)
+                            + " - the eroding /INTER/TYPE25 route builds its "
+                            "surface from a part, a part set or SURFATYP 5 "
+                            "only",
+                            _styp567_remedy(c.msid, c.mstyp))
+                        continue
                     _drop_interface(
                         state, dropped, kw, c.inter_id,
                         f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} "
@@ -7666,6 +7713,7 @@ def _make_type25_interfaces(state: ConversionState,
                     "self-contact (surf_ID1=the one surface, surf_ID2=0 -> "
                     f"starter ILEV=1, self-impact), Istf={istf}, Igap=2, "
                     f"Idel={_TYPE25_IDEL}, Iedge={iedge}.")
+            law_pids = ish_pids | written           # round 10, B6
 
         # CardStack K-11: the Card-2 BT / DT sign rules (a negative DT used
         # to be written as a negative Tstop); "no death time" is written 0,

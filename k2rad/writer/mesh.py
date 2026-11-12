@@ -2893,6 +2893,68 @@ def _shrf_ashear(state: ConversionState,
     return _shrf_rule(sec)
 
 
+def _note_shrf_route_section(state: ConversionState, sec: SectionShell,
+                             kind: str) -> None:
+    """R14 round 10, verification round (findings 6.32 (2)(f)): a
+    *SECTION_SHELL written on *kind* (/PROP/TYPE9, /PROP/TYPE11 or the
+    /PROP/TYPE51 of a rule layup), whose Ashear cell k2rad writes 0 or
+    0.833333 - the starter's 5/6 either way (hm_read_prop09.F:266,
+    hm_read_prop11.F:280, hm_read_prop51.F:255). Recorded when the A1 rule
+    gives LS-DYNA's factor a value away from 5/6 (:func:`_shrf_rule`: not an
+    excluded, ~5/6 or placeholder section). Text only."""
+    ls = _shrf_rule(sec)
+    if ls is not None:
+        state.shrf_other_routes.append(("*SECTION_SHELL", sec.secid, kind,
+                                        sec.shrf, ls))
+
+
+def _note_shrf_route_composite(state: ConversionState, pid: int, shrf: float,
+                               elform: int, cell: float) -> None:
+    """The *PART_COMPOSITE twin of :func:`_note_shrf_route_section`: its
+    /PROP/TYPE51 carries a stated 0 < SHRF <= 1 and writes 0.833333 for any
+    other value, where LS-DYNA's default is 1.0 (Vol I R17 *PART_COMPOSITE
+    Card 3a). Recorded when the cell is not the factor LS-DYNA runs."""
+    if elform in _SHRF_NO_SHEAR_ELFORMS:
+        return
+    ls = shrf if shrf != 0.0 else 1.0
+    if abs(ls - cell) >= _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW:
+        state.shrf_other_routes.append(("*PART_COMPOSITE", pid,
+                                        "/PROP/TYPE51", shrf, ls))
+
+
+def _warn_shrf_other_routes(state: ConversionState) -> List[str]:
+    """ONE sentence per deck naming the sections / composite parts on the
+    shell routes the SHRF rule does not reach (the records of
+    :func:`_note_shrf_route_section` / :func:`_note_shrf_route_composite`,
+    10 named at most). Writes no line; a starter-registry step after the
+    composite and fabric properties (writer/assembly)."""
+    seen: Dict[Tuple[str, int, str], float] = {}
+    for label, ident, kind, shrf, _ls in state.shrf_other_routes:
+        seen.setdefault((label, ident, kind), shrf)
+    if not seen:
+        return []
+    items = []
+    for (label, ident, kind), shrf in sorted(seen.items()):
+        what = ("SHRF blank: LS-DYNA's 1.0" if shrf == 0.0 else
+                f"SHRF {shrf:g}" if 0.0 < shrf <= 1.0 else
+                f"SHRF {shrf:g}, outside (0, 1]")
+        items.append(f"{label} {ident} ({what}) -> {kind}")
+    shown = "; ".join(items[:10]) + (f"; ... ({len(items)} in all)"
+                                     if len(items) > 10 else "")
+    state.warn(
+        f"{shown}: a shell route the SHRF rule (R14 round 10: /PROP/SHELL "
+        "Ashear = SHRF) does not reach - k2rad writes the property's Ashear "
+        "cell 0 (/PROP/TYPE9) or 0.833333 (/PROP/TYPE11, the /PROP/TYPE51 "
+        "of an *INTEGRATION_SHELL layup or of a *PART_COMPOSITE without a "
+        "stated 0 < SHRF <= 1), so it runs at the starter's 5/6 "
+        "(hm_read_prop09.F:266, hm_read_prop11.F:280, hm_read_prop51.F:255 "
+        "turn a 0 into 5/6) where LS-DYNA runs the stated SHRF or, for a "
+        "blank / 0, its default 1.0 (Vol I R17 p.41-63; *PART_COMPOSITE "
+        "Card 3a). Carrying the rule to these routes is a ROADMAP item; no "
+        "byte moves here.")
+    return []
+
+
 # LS-DYNA cohesive solid formulations (*SECTION_SOLID Vol I R16 p.41-88):
 # ±19 = 8-node 4-point cohesive (+19 zero-thickness, -19 with plane offset),
 # 20 = 19 with offsets for use WITH SHELLS (transmits moments), ±21/22 = the
@@ -5691,8 +5753,9 @@ def _warn_shell_shrf(state: ConversionState,
     if excl:
         state.warn(
             f"*SECTION_SHELL {_shrf_ids(_shrf_groups(excl, _shrf_excl_label))}"
-            ": SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0, "
-            "the starter's 5/6): NIP 1 is one point with no bending (Vol I R17 "
+            ": SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0: "
+            "the starter's 5/6, or 0 on an N-1 property): NIP 1 is one point "
+            "with no bending (Vol I R17 "
             "p.41-66) - on the N-1 property k2rad writes for a triangle-only "
             "NIP-1 section the starter zeroes Ashear itself "
             "(hm_read_prop01.F:246-259) and the engine integrates no "
@@ -5774,7 +5837,8 @@ def _warn_nip1_one_point(state: ConversionState, one_point: FrozenSet[int],
             "c3coef3.F:134-137), no starter switch acts on N 1 "
             "(c3grtails.F:710) and the starter zeroes Ashear there "
             "(hm_read_prop01.F:246-259). MEASURED on a /SH3N cantilever "
-            "(these default bytes, nt 4): the NIP-1 strips hang (tip -81.9 "
+            "coupon (the coupon's default bytes, nt 4): the NIP-1 strips hang "
+            "(tip -81.9 "
             ".. -82.7 mm, the hold-window mean) where N 2 bends (-0.4761 mm, "
             "Euler-Bernoulli 0.47619 mm); on "
             "mat_spring.belted-dummy (the one R14 carrier) with the SHRF rule: "
@@ -5799,8 +5863,12 @@ def _warn_nip1_one_point(state: ConversionState, one_point: FrozenSet[int],
         state.warn(
             f"*SECTION_SHELL {_capped_ids(ini)}: NIP 1 keeps /PROP/SHELL N "
             "max(2, NIP) = 2 because an *INITIAL_STRESS_SHELL / "
-            "*INITIAL_STRAIN_SHELL record names the section and its /INISHE "
-            "stations are written for that N (writer/inistate).")
+            "*INITIAL_STRAIN_SHELL record names the section: writer/inistate "
+            "writes the /INISHE stations for that N, and a record whose "
+            "NTHICK is not that N (an NTHICK 1 record) is skipped by name - "
+            "on such a record neither LS-DYNA's one point nor the initial "
+            "state survives (keeping N 1 where every record states NTHICK 1 "
+            "is a ROADMAP item).")
 
 
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
@@ -5817,6 +5885,9 @@ def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
             f"/PROP/TYPE9/{prop_id}: shell thickness is {sec.t1:g} (<=0), which "
             "the starter rejects (THICK must be > 0). Set the *SECTION_SHELL "
             "thickness for the LAW128 shell part.")
+    # the Ashear cell below stays 0 = the starter's 5/6 (hm_read_prop09.F:
+    # 266): recorded for the per-deck SHRF route sentence (verification round)
+    _note_shrf_route_section(state, sec, "/PROP/TYPE9")
     vx, vy, vz = refvec
     b20 = " " * 20
     return [

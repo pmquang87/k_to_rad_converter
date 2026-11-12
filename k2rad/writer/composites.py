@@ -60,6 +60,8 @@ from .mesh import (
     _emit_skew_fix,
     _law1_global_n_secids,
     _nip1_one_point_secids,
+    _note_shrf_route_composite,
+    _note_shrf_route_section,
     _ortho_skew_axes,
     _shell_istrain_flag,
 )
@@ -1161,6 +1163,7 @@ def _emit_rule_layup(state: ConversionState, prop_id: int, pid: int, title: str,
     # every AOPT that synthesizes a skew.
     lines = _emit_prop_type51(prop_id, title, ishell, 0, 0.0,
                               _ASHEAR_DEFAULT, axis, ply_ids, istrain)
+    _note_shrf_route_section(state, sec, "/PROP/TYPE51")  # verification rnd
     return lines + ply_lines
 
 
@@ -3795,6 +3798,7 @@ def _emit_prop_type11(prop_id: int, title: str, sec: SectionShell,
     """
     ishell = _elform_to_ishell(sec.elform, state.is_implicit,
                                state.options.shell_default_ishell)
+    _note_shrf_route_section(state, sec, "/PROP/TYPE11")  # verification rnd
     b10, b20 = " " * 10, " " * 20
     lines = [
         f"/PROP/TYPE11/{prop_id}",
@@ -3858,6 +3862,9 @@ def _emit_part_composite_prop(state: ConversionState, pc: PartComposite,
     # /PROP/SHELL rule only (the TYPE9 / TYPE11 / TYPE51 extensions stay a
     # ROADMAP item).
     ashear = pc.shrf if 0.0 < pc.shrf <= 1.0 else _ASHEAR_DEFAULT
+    # verification round: a cell that is not LS-DYNA's factor (a blank SHRF
+    # is LS-DYNA's 1.0) is named by the per-deck SHRF route sentence
+    _note_shrf_route_composite(state, pc.pid, pc.shrf, pc.elform, ashear)
     total_t = sum(p.thick for p in plies)
 
     # Material axes from the first ORTHOTROPIC ply material. The three

@@ -977,9 +977,10 @@ class DefaultSolidHourglassScreens(unittest.TestCase):
                 self.assertEqual(_solid_prop(s, 1), (1, 0.1))
 
     def test_a_preloaded_deck_keeps_the_full_integration_isolid(self):
-        # writer/preload._PRELOAD_STABLE_ISOLID: measured on a 1x1x4 hex bar at
-        # /PRELOAD Itype=2 / 200 MPa, Isolid 1 and 2 hit ZERO OR NEGATIVE
-        # VOLUME at cycle 0. The screen is deck-wide because the preloaded
+        # writer/preload._PRELOAD_STABLE_ISOLID: measured on a clamped 1x1x4
+        # hex bar at /PRELOAD Itype=2 / 200 MPa, Isolid 1 and 2 hold the
+        # preload during the hold and then lose the cut element (round 10,
+        # B9). The screen is deck-wide because the preloaded
         # parts are only known after the cross-section cut is resolved.
         deck = _hg_deck(extra=(
             "*DATABASE_CROSS_SECTION_PLANE\n"
