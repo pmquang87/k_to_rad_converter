@@ -848,6 +848,28 @@ class A13N2sCaution(unittest.TestCase):
                 self.assertIn("5 of 7 runs NORMAL", text)
         # the round-9 instruction stays
         self.assertIn("CHECK THAT THE CONTACT CARRIES LOAD", texts["code"])
+        # fix round (the round-10 code validator's a13_text: inverting the
+        # claim to 'is REPRODUCIBLE on identical bytes' survived the whole
+        # suite): the variance itself and the two other outcomes are pinned
+        # in every text (the help's spelling is the short one)
+        others = {"code": ("1 NORMAL with the block held",
+                           "1 ERROR TERMINATION on the implicit TIMESTEP "
+                           "LIMIT"),
+                  "readme": ("1 NORMAL with the block held",
+                             "1 ERROR TERMINATION on the implicit TIMESTEP "
+                             "LIMIT"),
+                  "help": ("5 of 7 runs NORMAL with the block through, 1 "
+                           "held, 1 TIMESTEP-LIMIT stop",)}
+        for where, text in texts.items():
+            with self.subTest(where=where, needle="varies run to run"):
+                self.assertIn("the outcome varies run to run on identical "
+                              "bytes", text.lower())
+            for needle in others[where]:
+                with self.subTest(where=where, needle=needle):
+                    self.assertIn(needle, text)
+            with self.subTest(where=where, absent="reproducible"):
+                self.assertNotIn("is reproducible on identical bytes",
+                                 text.lower())
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3041,6 +3063,124 @@ class LsDefaultTssfacNamed(unittest.TestCase):
             with self.subTest(slsfac=sls):
                 st.ctrl_contact = ControlContact(sls, 0.0, 1, 0, 1, 0)
                 self.assertEqual(assembly._ls_default_tssfac(st)[0], value)
+
+
+class A1ExclusionEveryMember(unittest.TestCase):
+    """Fix round (the code validator's a1_2d13: dropping ELFORM 13 from
+    _SHRF_NO_SHEAR_ELFORMS survived the whole suite and moved the roster
+    deck ex_16_thin_shell_elform_13): ONE subTest per member. A member the
+    converter routes to the 2-D /QUAD path gets no cell and no sentence (D-2);
+    with the route off (axisymmetric_2d=False) its /PROP/SHELL keeps 0 and is
+    named."""
+
+    def test_every_member_keeps_the_cell_and_is_named(self):
+        from k2rad.writer import mesh
+        members = sorted(mesh._SHRF_NO_SHEAR_ELFORMS)
+        self.assertEqual(members,
+                         [-29, 5, 9, 12, 13, 14, 15, 29, 43, 44, 52, 55])
+        for e in members:
+            for kw in ({}, {"axisymmetric_2d": False}):
+                with self.subTest(elform=e, **kw):
+                    res, st, _e = _convert(_plate(shrf="1.0", elform=e), **kw)
+                    notes = _shrf_notes(res)
+                    if "/PROP/SHELL/1" not in st:
+                        self.assertIn(e, (14, 15))        # the routed 2-D
+                        self.assertEqual(kw, {})
+                        self.assertEqual(notes, [])
+                        continue
+                    self.assertEqual(_ashear(st), "0")
+                    self.assertEqual(len(notes), 1, notes)
+                    self.assertTrue(notes[0].startswith(
+                        f"*SECTION_SHELL 1 (ELFORM {e}): SHRF is NOT written "
+                        "to the /PROP/SHELL Ashear cell"), notes)
+        # a 3-D control writes the stated 1.0
+        _r, st, _e = _convert(_plate(shrf="1.0"))
+        self.assertEqual(_ashear(st), "1")
+
+    def test_a_placeholder_section_keeps_the_cell_0(self):
+        """A k2rad-synthetic section (card_given False: here the
+        AutoPropShell of a part whose SECID names no *SECTION_SHELL) keeps
+        Ashear 0 and is not named (the code validator's a1_synth was caught
+        only by an older test)."""
+        deck = _plate(shrf="1.0").replace("*PART\nplate\n" + _row(1, 1, 1),
+                                          "*PART\nplate\n" + _row(1, 7, 1))
+        self.assertIn(_row(1, 7, 1), deck)
+        res, st, _e = _convert(deck)
+        lines = st.splitlines()
+        i = lines.index(next(ln for ln in lines
+                             if ln.startswith("AutoPropShell_")))
+        prop = int(lines[i - 1].split("/")[-1])
+        self.assertEqual(_ashear(st, prop), "0")
+        self.assertFalse(_has(_shrf_notes(res), f"*SECTION_SHELL {prop} "))
+
+
+class A2TwoDElformsEveryMember(unittest.TestCase):
+    """Fix round (the code validator's x_a2_2d13): ONE subTest per member of
+    _TWO_D_SHELL_ELFORMS_A2 - a NIP-1 triangle-only section of a 2-D ELFORM
+    keeps N 2 and gets no A2 sentence; the 3-D control is written N 1."""
+
+    def test_every_2d_member_keeps_n_2_without_the_sentence(self):
+        from k2rad.writer import mesh
+        members = sorted(mesh._TWO_D_SHELL_ELFORMS_A2)
+        self.assertEqual(members, [-29, 12, 13, 14, 15, 29, 43, 44, 52, 55])
+        base = "*SECTION_SHELL\n" + _row(1, 2, "", 1)
+        for e in members:
+            with self.subTest(elform=e):
+                deck = _tri_deck().replace(
+                    base, "*SECTION_SHELL\n" + _row(1, e, "", 1))
+                self.assertIn(_row(1, e, "", 1), deck)
+                res, st, _e = _convert(deck)
+                self.assertEqual(_shell_n(st), 2)
+                self.assertFalse(_has(res.warnings,
+                                      "on a section of triangles only"))
+        res, st, _e = _convert(_tri_deck())
+        self.assertEqual(_shell_n(st), 1)
+        self.assertTrue(_has(res.warnings, "on a section of triangles only"))
+
+
+class A5EndFixpointOnASegmentChain(unittest.TestCase):
+    """Fix round (the code validator's x_a5_seg_end; findings 6.17 D15): on
+    an --imflag-curve-restart chain each IMPLICIT segment's end point is its
+    OWN /RUN end (seg.t_stop), never the deck's ENDTIM; an explicit segment
+    gets none; the sentence prints once per deck."""
+
+    def test_each_implicit_segment_ends_at_its_own_stop(self):
+        dyn = "*CONTROL_IMPLICIT_DYNAMICS\n" + _row(1, 0.25, 0.5) + "\n"
+        pts = ((0.0, 1.0), (0.00499, 1.0), (0.005, 0.0), (0.00999, 0.0),
+               (0.01, 1.0), (1.0, 1.0))
+        deck = _t8._ie_strip_deck(pts)
+        self.assertEqual(deck.count("*END\n"), 1)
+        deck = deck.replace("*END\n", dyn + "*END\n")
+        res, _s, eng, _n = _t8._convert_files(deck, imflag_curve_restart=True)
+        self.assertEqual(len(eng), 3)
+        stops = [float(e.splitlines()[1]) for e in eng]
+        self.assertEqual(stops, [0.005, 0.01, 0.025])
+        for e, t_stop, implicit in zip(eng, stops, (True, False, True)):
+            with self.subTest(t_stop=t_stop):
+                lines = e.splitlines()
+                self.assertEqual("/IMPL/DYNA/2" in lines, implicit)
+                fix = [float(lines[i + 1]) for i, ln in enumerate(lines)
+                       if ln.startswith("/IMPL/DT/FIXPOINT")]
+                self.assertEqual(fix, [t_stop] if implicit else [])
+        self.assertEqual(len([w for w in res.warnings
+                              if "/IMPL/DT/FIXPOINT" in w
+                              and "end time" in w]), 1, res.warnings)
+
+
+class A6OptInDefaults(unittest.TestCase):
+    """Fix round (the code validator's a6_default was caught only by the
+    default-ON docstring list): the opt-in's own defaults, directly."""
+
+    def test_the_dataclass_convert_and_cli_say_off(self):
+        import inspect
+        import k2rad
+        from k2rad import cli
+        from k2rad.state import ConvertOptions
+        self.assertIs(ConvertOptions().implicit_rayleigh_damping, False)
+        self.assertIs(inspect.signature(k2rad.convert).parameters[
+            "implicit_rayleigh_damping"].default, False)
+        self.assertIs(cli.build_parser().parse_args(
+            ["x.k"]).implicit_rayleigh_damping, False)
 
 
 def _clis_light_fluid_deck() -> str:

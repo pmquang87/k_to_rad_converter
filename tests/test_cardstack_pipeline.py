@@ -1499,6 +1499,15 @@ class TiebreakCompanionStfac(unittest.TestCase):
         _r, s, _e = _convert(_tb_deck(_tb_card3(0.5, "")))
         self.assertEqual(self._cell(s), 0.5)
 
+    def test_the_smaller_sfm_wins_too(self):
+        """Hand: min(0.8, 0.5) = 0.5 - every other case has SFS <= SFM, so
+        an 'SFM ignored' mutation (v = SFS) survived the whole suite (the
+        round-10 code validator's b3_sfm)."""
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.8, 0.5)))
+        self.assertEqual(self._cell(s), 0.5)
+        self.assertTrue(_has(res.warnings, "Stfac=0.5 on the companion",
+                             "min(0.8, 0.5)"), res.warnings)
+
     def test_the_card_can_stiffen_it(self):
         """Hand: min(2, 3) = 2."""
         _r, s, _e = _convert(_tb_deck(_tb_card3(2.0, 3.0)))
@@ -5179,6 +5188,20 @@ class SrndeControlContactShledg(unittest.TestCase):
             _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1)),
             extra=_control_contact(6)))
         self.assertEqual(_ishape(s, 21), "2")
+
+    def test_soft_1_ignores_the_control_shledg(self):
+        """The SOFT 1 twin (the docstring's 'SOFT 0 / 1 are untouched' had
+        no SOFT 1 case: treating SOFT 1 like SOFT 2 survived the whole suite,
+        the round-10 code validator's b7_soft1): Ishape 2, and no sentence
+        that names SOFT 2."""
+        res, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(1,))),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "2")
+        self.assertFalse(_has(res.warnings, "21: Card E SRNDE 1 is not used"),
+                         res.warnings)
+        self.assertFalse(_has(res.warnings, "with SOFT 2, *CONTROL_CONTACT "
+                              "SHLEDG"), res.warnings)
 
     def test_card_d_keeps_precedence(self):
         res, s, _e = _convert(_k1a_deck(
