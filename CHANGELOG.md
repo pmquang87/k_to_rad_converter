@@ -948,7 +948,13 @@ Prior history (before this changelog was introduced) is summarized in the
     LS times (9.936e-6, 1.49991e-3], IE END +0.1348 % on both arms, the
     driven die `/TH/NODE/90024` DZ = the integral of LCID 1 at every fifth -
     the round's one verdict flip, deviation -> match (MEASURED in report
-    §0.36). The named
+    §0.36). It is a match of two MASS-SCALED runs (named by the verification
+    round, findings 6.30 (4)): LS-DYNA adds 199.18 % of its physical mass
+    2.24e-5 by the deck's own DT2MS (glstat's last block, added mass
+    4.4617e-5), OpenRadioss 248.2 % on the `ed52c93` bytes (MAS.ERR 2.482,
+    5.561e-5 at cycle 12500) and 182.7 % on these (1.827, 4.092e-5 at
+    cycle 13889), and the skill launcher's strict audit refuses the row on
+    both byte sets (FLAG added-mass). The named
     cost: `07_metalstrip` (DT2MS -1e-4, TSSFAC 0.5; not_comparable, LS IE a
     structural zero) runs x2.000 cycles (20000, LS 20001), its added mass
     +167.08 -> -33.22 % of LS-DYNA's 0.5485 t at every fifth, KE END -93.73
