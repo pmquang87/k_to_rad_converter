@@ -1,10 +1,19 @@
 # R14 campaign parity round 10 - MERGE DUTIES (report section 0.37) - chip prompt
 
-Written by the round-10 coordinator (session r14-round10-05682a, 2026-11-07). The fix-and-PR agent fills the four
-`<...>` fields below when it commits this file; the session that runs the duties measures everything else itself.
+Written by the round-10 coordinator (session r14-round10-05682a, 2026-11-07); corrected in place by the
+verification round (findings 6.29 (3), 6.30 (3)(b), 6.31 (2)(g)): every fact below is current, nothing is
+overridden further down. The session that runs the duties measures everything itself.
 
-PR: #148 (branch `claude/r14-round10-05682a`, base master ed52c93; head `4579f60c72ead5673d72357ca3b544703875e1ad`, last code commit
-`7a63e1d3dc0f9e30760b63825ff70467559c6969`). The round-10 campaign pass on the branch = report section 0.36 (`section 0.36 (branch ab53752): 238 keys / 205 models moved (169 / 147 by bytes), 158 runnable byte movers re-run, the ledger normal 300 -> 302 / error_engine 23 -> 21 / match 34 -> 35 / deviation 144 -> 145 / not_comparable 188 -> 186 (= the decision's expectation), implicit residue 24 / 24; section 0.36.1 (branch 4579f60, the fix round): 0 byte movers, 25 warning-only movers re-converted, the ledger unchanged, db.json md5 3117dab9fc518407863adcd91d24f76a`).
+PR: #148 (branch `claude/r14-round10-05682a`, base master `b17c298` = `ed52c93` + PR #146 (docs) + PR #147
+(CODE), merged into the branch as `e512676` with the user's permission; `ed52c93` is the round's start and the
+campaign's `_meta` baseline, not the PR's base). The PR head is NOT named here: read it with `gh pr view 148
+--repo pmquang87/k_to_rad_converter --json headRefOid`. The last code commit of the PR is
+`218b06aeeb35f5ecb2a4e331dbc960b3b8713188` (measured: `git diff 218b06a..<head> -- k2rad tools k2rad.py
+k2rad_gui.py` empty). The round-10 campaign passes on the branch: report section 0.36 (branch `ab53752`:
+238 keys / 205 models moved, 169 / 147 by bytes, 158 runnable byte movers re-run, the ledger normal 300 -> 302
+/ error_engine 23 -> 21 / match 34 -> 35 / deviation 144 -> 145 / not_comparable 188 -> 186, implicit residue
+24 / 24), section 0.36.1 (branch `4579f60`, the fix round: 0 byte movers, 25 warning-only movers re-converted,
+the ledger unchanged) and section 0.36.2 (the verification round: 0 byte movers, 37 warning-only movers on 32 models re-converted at `0d3a4e1` (RECONVERTED, not re-run), the ledger unchanged, the rows naming the branch 243).
 
 ## Role and the standing rules
 
@@ -48,11 +57,12 @@ worktree; commit nothing (the duties write only the campaign mirror, the memorie
    commit, the merge time; `git ls-remote origin master` must equal M10 (if a later commit sits above M10, the
    baseline target is master's head and the k2rad package identity across M10 and that head is asserted exactly as
    0.35 asserted it across e0e0ef9 and ed52c93). Assert the k2rad package identity: `git diff --stat <PR head> M10
-   -- k2rad tools k2rad.py k2rad_gui.py` EMPTY and the same against fba6afd (origin/master before the merge, docs
-   only). If the PR was merged WITH a merge of origin/master into the branch (the user's decision, see the PR body's
-   'Merge state'), the identity check is the same. D0 = the number of db.json rows whose `conversion.k2rad_branch`
-   is `claude/r14-round10-05682a` (read a COPY of db.json; D0 should equal the 0.36 pass's mover count; D0 > 0 ->
-   PATTERN P34 below; D0 = 0 -> PATTERN P35 = the whole 0.35 order). The main checkout's state from
+   -- k2rad tools k2rad.py k2rad_gui.py` EMPTY. Against `fba6afd` or `ed52c93` the same diff is NOT empty (PR
+   #147's code and round 10's): do not run it against them. If a commit above M10 exists, the identity is
+   asserted across M10 and that head as well. D0 = the number of db.json rows whose `conversion.k2rad_branch`
+   is `claude/r14-round10-05682a` (read a COPY of db.json; measured after the PR's last campaign pass: 243, the
+   stamps `ab53752` x192 + `4579f60` x14 + `0d3a4e1` x37 - section 0.36.2; D0 > 0 -> PATTERN P34 below; D0 = 0 -> PATTERN P35 = the whole 0.35
+   order). The main checkout's state from
    `git -C <main> reflog show master --date=iso -5` and `rev-parse HEAD` (pulled to M10 or not; its MEASURED
    untracked set from `git status --porcelain` - never a remembered count). The runner IDLE (`_infra/current.txt`,
    runner.pid's PID not alive by Get-CimInstance). db.json md5 recorded. Nothing else runs on the machine.
@@ -71,11 +81,15 @@ worktree; commit nothing (the duties write only the campaign mirror, the memorie
 4. THE SWEEP (`launch_sweep_r10.ps1` re-pointed; `-Keep`): all 356 roster keys converted from F: at NEW through
    `verify_warnings.py sweep --tree <clone13> --arm sw_p13_<NEW7> --baseline NEW --keep <dir>`, then
    `verify_warnings.py check --records <sweep> --baseline NEW`. PATTERN P34 (D0 > 0): the round-10 rows were
-   converted at the PR head and the package at NEW equals the PR head's, so BYTES_DIFFER must be 0 on them and
-   NOT_ANCESTOR must be 0 (the branch commits are ancestors of M10); the only FAIL rows allowed are rows the 0.36
-   pass did not re-convert although their bytes or warning records move (there should be none - if the census finds
-   any, they are movers the 0.36 pass missed: a finding for the record, then the P35 steps 5-6 for exactly those
-   rows); NOTE_SHA_STALE / NOTE_STALE on the branch rows are expected until step 7. Census the FAIL rows with
+   converted at several branch commits (`ab53752` x192 + `4579f60` x14 + `0d3a4e1` x37); the stamps are valid because a fresh sweep of the
+   PR head reproduces every row's bytes and warning record (check FAIL 0 / WARN 5 / OK 351: the coordinator and
+   the evidence verifier at bc2910c, the verification round at its last code commit), so BYTES_DIFFER must be 0
+   on them. NOT_ANCESTOR must be 0 ONLY IF the user merged with a MERGE COMMIT (as PR #143 and #144 were): after
+   a squash or a rebase merge the branch shas are not ancestors of master, the check then reports NOT_ANCESTOR on
+   all D0 rows until step 7 re-stamps them - expected, not a deviation; the package identity of step 0 decides.
+   The only FAIL rows allowed besides are rows no pass re-converted although their bytes or warning records
+   move (there should be none - if the census finds any, they are movers a pass missed: a finding for the
+   record, then the P35 steps 5-6 for exactly those rows); NOTE_SHA_STALE / NOTE_STALE on the branch rows are expected until step 7. Census the FAIL rows with
    `census_movers_r10.py` (the block classifier; print every unlabelled hunk).
 5. (only if step 4 found uncovered byte movers) `pass_prepare_r10.py` / `pass_convert_r10.py` / `pass_after_r10.py`
    re-pointed: reset the runnable ones, convert ALL uncovered movers from the clone (`--tree`), run the runnable
@@ -106,7 +120,8 @@ worktree; commit nothing (the duties write only the campaign mirror, the memorie
    re-measured in place (0 rows on an unmerged branch - the round-10 branch is merged; N on older merged branches;
    master; no branch field; the sum = 373); the model-count sentence re-dated to NEW; the 0.35 label lesson: the
    RECONVERTED / REFUSAL UNCHANGED counts in the README line come from the conversion log, never from the mover
-   count. The section records: the merge facts from `gh`, the package identity across the PR head / fba6afd / M10,
+   count. The section records: the merge facts from `gh`, the package identity across the PR head and M10 (never fba6afd: PR #147's code
+   sits between),
    D0 and the pattern used, the sweep (two halves), the census of FAIL rows (expected 0 bytes), the re-stamp with its
    SHA proof, the `_meta` table (before / after), the checks, the provenance table, the branch census, the ledger
    (unchanged by a re-baseline unless step 5 ran), the k2rad gates on the clone, the cleanup, the drift (the skill
@@ -126,34 +141,27 @@ worktree; commit nothing (the duties write only the campaign mirror, the memorie
 
 ## What round 10 leaves for the merge duties specifically (from the decision doc and the 0.36 section)
 
-- The 0.36 pass converted every half-A mover from the branch worktree (`--tree`), so D0 = that mover count
-  (expected 234 keys / 203 models before the gate outcome; read the 0.36 section's measured count).
+- D0 = the rows that name the branch: MEASURED 243 after the verification round's pass (`ab53752` x192 + `4579f60` x14 + `0d3a4e1` x37;
+  section 0.36.2). Read it from a db.json copy - never type in 234, 238 or 240.
 - STALE_RUN 5 (2Dlag, ale_wavehitcol, intermediate-fsi-2-flaps, the Yaris roof crush, the Yaris door sag) stays;
   the 8 giant byte movers were converted + starter-only in 0.36 (their runs stay stale or pending; never launched).
-- The implicit residue 24 / 24 expected unchanged; the ledger after 0.36 is the one the section 0.36 measured
-  (expected normal 302 / error_engine 21 / match 35 / deviation 145 / not_comparable 186 - read the measured one).
+- The implicit residue 24 / 24 and the ledger measured in 0.36 (normal 302 / error_engine 21 / match 35 /
+  deviation 145 / not_comparable 186), unchanged by 0.36.1 and 0.36.2 - read the current one.
 - The skill launcher and `_infra/run_or.ps1` + `_infra/audit_or_run.py` were re-synced by C1 (md5 d22c3eee /
   9f99fb99 at the time); assert they still match the skill's files at the merge (the skill may have moved again).
-- If the user did NOT allow the merge of origin/master into the branch, M10's tree carries fba6afd's docs on top of
-  the PR head's; the k2rad package is identical by construction (assert it); CHANGELOG.md's order is whatever the
-  user resolved.
+- origin/master `b17c298` is merged into the branch (`e512676`). If master moved beyond `b17c298` before the user's
+  merge, M10 carries those commits too: assert the package identity across the PR head and M10 and name every
+  extra commit in 0.37.
 
-## Facts the fix-and-PR agent measured (2026-11-12) - they override the text above where they differ
+## Facts measured by the fix-and-PR agent and the verification round (2026-11-12) - the record
 
-- **The PR head.** The head named above is the commit BEFORE the docs commit that adds this file; the PR's
-  head is that docs commit (read `gh pr view 148 --repo pmquang87/k_to_rad_converter --json
-  headRefOid`). Both carry the package of the last code commit.
 - **Master and the merge.** origin/master is `b17c298` (PR #146 docs + PR #147 CODE: `k2rad/handlers.py`,
-  `k2rad/writer/contacts.py`), merged into the branch as `e512676` with the user's permission (findings 6.19a).
-  The identity check of step 0 is therefore `git diff --stat <PR head> M10 -- k2rad tools k2rad.py
-  k2rad_gui.py` EMPTY; against `fba6afd` / `ed52c93` it is NOT empty (PR #147's code and round 10's). The PR
-  head's package is the last code commit `7a63e1d3dc0f9e30760b63825ff70467559c6969`; the commits after it touch tests and docs only.
-- **D0** (rows naming `claude/r14-round10-05682a` after the fix round): **240** = the 238 rows of report
-  section 0.36 (234 converted + 4 refusals re-stamped; ab53752 x238 at the end of 0.36) re-stamped or added to by
-  the fix round's re-conversions: ab53752 x215 + 4579f60 x25 at the end of section 0.36.1 (the fix round re-converted its 25 warning-only movers: 23 inside the 238 and underwater_A / _B, which were ed52c93 / master rows before). Expect exactly this number, never "234".
+  `k2rad/writer/contacts.py`), merged into the branch as `e512676` with the user's permission (findings 6.19a);
+  step 0 says what the identity check compares.
+- **D0 and its stamps**: 243 rows (`ab53752` x192 + `4579f60` x14 + `0d3a4e1` x37) after section 0.36.2; 238 after 0.36, 240 after 0.36.1.
 - **The fix round moved warning text only** (report section 0.36.1): 0 byte movers on the 356 roster keys
-  between `ab53752` and `7a63e1d3dc0f9e30760b63825ff70467559c6969`; 25 keys / 23 models warning-record movers re-converted (RECONVERTED, not
-  re-run); the ledger did not move.
+  between `ab53752` and `7a63e1d`; 25 keys / 23 models warning-record movers re-converted (RECONVERTED, not
+  re-run); the ledger did not move. **The verification round** (section 0.36.2) moved warning text only too: 0 byte movers, 37 warning-only movers on 32 models re-converted at `0d3a4e1` (RECONVERTED, not re-run), the ledger unchanged, the rows naming the branch 243.
 - **PR #147's own column** (`ed52c93` -> `b17c298`): 0 byte movers on the roster, 0 roster warning records (15
   warning-record movers outside the roster: the CardStack archive 10, Ryan_Lee 5) - report it in its own column,
   never inside a round-10 item.
@@ -173,3 +181,8 @@ worktree; commit nothing (the duties write only the campaign mirror, the memorie
   pan.drawbead.31 end exit 5 (FLAG energy-error-clamped, the one newly flagged roster row; findings 6.27).
 - **stagnation_A / _B cycle counts**: the campaign rows record the engine's TOTAL (9365); the implementers' and
   the physics validator's runs quote the last printed cycle (9364). Name the run beside every figure.
+- **Follow-ups that are not merge duties** (named so the session does not mistake them for one): the
+  campaign scorer's guard against an A5 sliver last row (flag or skip an END row whose increment is below about
+  half of the one before - a campaign candidate; the 0.36.2 scan found no scored row below 0.5 today, the
+  lowest 0.622); the K-04 cap RE-OPENED for round 11 (ROADMAP); the tests.yml ubuntu skip comment (13 where CI
+  shows 14) and the GUI's two-widget cells (rows 10 / 13), both older than round 10.

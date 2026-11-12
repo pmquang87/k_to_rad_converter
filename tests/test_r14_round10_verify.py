@@ -631,5 +631,33 @@ class Round10VerifyRetractions(unittest.TestCase):
                                     "VOLUME"), _norm(_src(rel)))
 
 
+class MergeDutiesFileIsCurrent(unittest.TestCase):
+    """Findings 6.29 (3), 6.30 (3)(b), 6.31 (2)(g): the merge-duties chip
+    prompt tells its reader to stop at the FIRST deviation, so its stale
+    template sentences were corrected in place - no named head, the base
+    b17c298, the package identity against M10 only, D0 measured, the
+    merge-kind precondition of NOT_ANCESTOR 0."""
+
+    def test_the_stale_sentences_are_gone_and_the_facts_stand(self):
+        text = _t7._collapse(_src("docs/R14_ROUND10_MERGE_DUTIES.md"))
+        for stale in ("base master ed52c93", "that docs commit",
+                      "EMPTY and the same against fba6afd",
+                      "expected 234 keys / 203 models",
+                      "D0 should equal the 0.36 pass's mover count",
+                      "the round-10 rows were converted at the PR head"):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, text)
+        for fact in ("base master `b17c298`",
+                     "The PR head is NOT named here: read it with `gh pr "
+                     "view 148",
+                     "Against `fba6afd` or `ed52c93` the same diff is NOT "
+                     "empty",
+                     "NOT_ANCESTOR must be 0 ONLY IF the user merged with a "
+                     "MERGE COMMIT",
+                     "never type in 234, 238 or 240"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, text)
+
+
 if __name__ == "__main__":
     unittest.main()
