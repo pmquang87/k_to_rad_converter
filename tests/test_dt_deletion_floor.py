@@ -84,6 +84,38 @@ class TestNothingIsEmittedUninvited(unittest.TestCase):
         self.assertIn("--dt-del", reason)
 
 
+class TestNothingIsEmittedUninvitedLegacy(unittest.TestCase):
+    """The ``_LEGACY`` twins of the three half-request tests above (findings
+    6.34 (4)(h), mutant J_dtfloor_legacy_erode). Those were written for the
+    ed52c93 default and now run under round 10's A11 default, where no floor
+    is ever written, so they pin nothing of the deck route. On the
+    ``--no-erode-tsmin-rule`` arm a floor still needs BOTH ERODE=1 and
+    TSLIMT>0: half a request writes no card and is reported."""
+
+    def test_erode_without_a_threshold_emits_nothing(self):
+        st = _state(erode=1, tslimt=0.0, **_LEGACY)
+        self.assertEqual(_make_engine_dt_deletion(st), [])
+
+    def test_threshold_without_erode_emits_nothing(self):
+        """TSLIMT alone is a step LIMIT in LS-DYNA, not permission to delete
+        (without the ERODE condition it would write all three cards)."""
+        st = _state(erode=0, tslimt=3.5e-8, **_LEGACY)
+        self.assertEqual(_make_engine_dt_deletion(st), [])
+        self.assertEqual(st.warnings, [])
+
+    def test_a_half_request_is_reported_not_dropped(self):
+        for erode, tslimt in ((1, 0.0), (0, 3.5e-8)):
+            with self.subTest(erode=erode, tslimt=tslimt):
+                st = _state(erode=erode, tslimt=tslimt, **_LEGACY)
+                _make_engine_dt_deletion(st)
+                reason = dict(st.recognized_not_emitted).get(
+                    "CONTROL_TIMESTEP", "")
+                for needle in (f"ERODE={erode} / TSLIMT={tslimt:g}",
+                               "a floor needs BOTH ERODE=1 and TSLIMT>0",
+                               "--dt-del"):
+                    self.assertIn(needle, reason)
+
+
 class TestTheDeckAsking(unittest.TestCase):
     """The ed52c93 deck route, now the --no-erode-tsmin-rule arm."""
 

@@ -13,8 +13,17 @@ the code verifier's surviving mutations).
    caution's bytes, the A5 sliver range, the transducer, the damping help,
    the A2 / S-excl / initial-state wordings) and the retraction guard over
    hyphen- and whitespace-collapsed, case-folded text.
+4. The coordinator's own mutants of the verification round's code (findings
+   6.34 (4)), seven boundary pins: the SHRF recorder at /PROP/TYPE11 and at
+   the /PROP/TYPE51 of a rule layup, the membrane exclusion of the
+   *PART_COMPOSITE recorder, the sentence's cap of ten, the eroding route's
+   MAIN-side SURFATYP 6 / 7 drop, the main side's written parts and a
+   segment-set side's part in the B6 scope. The eighth pin (the legacy arm of
+   the deletion floor's half requests) is in tests/test_dt_deletion_floor.py.
 
-Every test here fails on bc2910c (or on the named mutant of it).
+Every test of sections 1 - 3 fails on bc2910c (or on the named mutant of
+it); every test of section 4 fails on the named coordinator mutant of
+5108531.
 """
 
 import math
@@ -27,6 +36,7 @@ import test_cardstack_pipeline as _C
 import test_cardstack_pipeline_engine as _E
 import test_cardstack_pipeline_props as _tp
 import test_composites as _tc
+import test_integration_shell as _is
 import test_preload_inistate as _P
 import test_r14_round10 as _r10
 import test_r14_triage_7 as _t7
@@ -657,6 +667,219 @@ class MergeDutiesFileIsCurrent(unittest.TestCase):
                      "never type in 234, 238 or 240"):
             with self.subTest(fact=fact):
                 self.assertIn(fact, text)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 4. The coordinator's own mutants of the verification round's code
+#    (findings 6.34 (4); each class names its mutant)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _layup_deck(shrf, mat=_is.STEEL, mid=3):
+    """tests/test_integration_shell's rule-driven layup (a 3-point
+    *INTEGRATION_SHELL on an ELFORM 2, NIP 5 *SECTION_SHELL 7) with the
+    section's SHRF stated: *MAT_024 (LAW36) goes to /PROP/TYPE51 + TYPE19,
+    *MAT_002 (LAW93, one law) to /PROP/TYPE11."""
+    section = _is._section()
+    old = _is._row(7, 2, 1.0, 5)
+    if section.count(old) != 1:
+        raise AssertionError("test_integration_shell's section card moved")
+    return _is._deck(mat=mat, mid=mid,
+                     section=section.replace(old, _is._row(7, 2, shrf, 5)))
+
+
+class ShrfRouteType11IsRecorded(unittest.TestCase):
+    """J_shrf_type11_rec (6.34 (4)(a)): /PROP/TYPE11 records its section at
+    its own emitter (writer/composites._emit_prop_type11) - one test of the
+    shared recorder leaves every other call site free to vanish."""
+
+    def test_a_stated_1_on_type11_is_named(self):
+        res, st, _e = _convert(_layup_deck(1.0, _is._mat002(), 2))
+        self.assertIn("/PROP/TYPE11/", st)
+        self.assertNotIn("/PROP/TYPE51/", st)
+        lines = _route_lines(res)
+        self.assertEqual(len(lines), 1, res.warnings)
+        self.assertTrue(lines[0].startswith(
+            "*SECTION_SHELL 7 (SHRF 1) -> /PROP/TYPE11: a shell route the "
+            "SHRF rule"), lines[0])
+        self.assertIn("hm_read_prop11.F:280", lines[0])
+
+    def test_a_five_sixths_section_on_type11_is_not(self):
+        res, st, _e = _convert(_layup_deck("0.8333", _is._mat002(), 2))
+        self.assertIn("/PROP/TYPE11/", st)
+        self.assertEqual(_route_lines(res), [])
+
+
+class ShrfRouteRuleLayupType51IsRecorded(unittest.TestCase):
+    """J_shrf_type51_rec (6.34 (4)(b)): the /PROP/TYPE51 of an
+    *INTEGRATION_SHELL layup records its section in _emit_rule_layup - the
+    route of the two R14 carriers integration_shell.lobotto.beam and
+    275key2."""
+
+    def test_a_stated_1_on_a_type51_layup_is_named(self):
+        res, st, _e = _convert(_layup_deck(1.0))
+        self.assertIn("/PROP/TYPE51/", st)
+        self.assertNotIn("/PROP/TYPE11/", st)
+        lines = _route_lines(res)
+        self.assertEqual(len(lines), 1, res.warnings)
+        self.assertTrue(lines[0].startswith(
+            "*SECTION_SHELL 7 (SHRF 1) -> /PROP/TYPE51: a shell route the "
+            "SHRF rule"), lines[0])
+        self.assertIn("hm_read_prop51.F:255", lines[0])
+
+    def test_a_five_sixths_section_on_a_type51_layup_is_not(self):
+        res, st, _e = _convert(_layup_deck("0.8333"))
+        self.assertIn("/PROP/TYPE51/", st)
+        self.assertEqual(_route_lines(res), [])
+
+
+class ShrfRouteSkipsMembraneComposites(unittest.TestCase):
+    """J_shrf_comp_noshear (6.34 (4)(c)): a membrane *PART_COMPOSITE (ELFORM
+    5 / 9: no bending, no transverse shear) is not named, whatever its SHRF -
+    LS-DYNA's factor acts on nothing there (writer/mesh.
+    _SHRF_NO_SHEAR_ELFORMS); the same card on ELFORM 2 is."""
+
+    def _pc(self, elform):
+        return _convert("*KEYWORD\n" + _tc.NODES + _tc.SHELL
+                        + _tc._part_composite(elform=elform, shrf="")
+                        + _tc._mat002() + _tc.END)
+
+    def test_a_membrane_composite_is_silent(self):
+        for elform in (5, 9):
+            with self.subTest(elform=elform):
+                res, st, _e = self._pc(elform)
+                self.assertIn("/PROP/TYPE51/", st)
+                self.assertEqual(_route_lines(res), [])
+        res, _st, _e = self._pc(2)
+        lines = _route_lines(res)
+        self.assertEqual(len(lines), 1, res.warnings)
+        self.assertIn("*PART_COMPOSITE 7 (SHRF blank: LS-DYNA's 1.0) -> "
+                      "/PROP/TYPE51", lines[0])
+
+
+class ShrfRouteSentenceCapsAtTen(unittest.TestCase):
+    """J_shrf_cap10 (6.34 (4)(d)): the sentence names ten routes at most and
+    counts the rest - at exactly 10 all ten and no count, at 11 the first
+    ten and '; ... (11 in all)'."""
+
+    def _named(self, n):
+        from k2rad.state import ConversionState
+        from k2rad.writer.mesh import _warn_shrf_other_routes
+        st = ConversionState()
+        for secid in range(1, n + 1):
+            st.shrf_other_routes.append(("*SECTION_SHELL", secid,
+                                         "/PROP/TYPE9", 1.0, 1.0))
+        self.assertEqual(_warn_shrf_other_routes(st), [])
+        lines = [w for w in st.warnings if "a shell route the SHRF rule" in w]
+        self.assertEqual(len(lines), 1, st.warnings)
+        return lines[0].split(": a shell route the SHRF rule")[0].split("; ")
+
+    @staticmethod
+    def _item(secid):
+        return f"*SECTION_SHELL {secid} (SHRF 1) -> /PROP/TYPE9"
+
+    def test_ten_are_all_named(self):
+        self.assertEqual(self._named(10), [self._item(k) for k in range(1, 11)])
+
+    def test_the_eleventh_is_counted_not_named(self):
+        self.assertEqual(self._named(11), [self._item(k) for k in range(1, 11)]
+                         + ["... (11 in all)"])
+
+
+def _eroding_deck(contact, extra=""):
+    """The K1a probe (part 1 = the hex block, here *MAT_ARUP_ADHESIVE ->
+    /MAT/LAW169; parts 101 / 102 = the two shell cards = *SET_PART 1; *SET_PART
+    2 = the block) under *contact*."""
+    base = _C._k1a_deck(contact, block_e=10.0, extra=extra)
+    if base.count(_C._SOFT_BLOCK_MAT) != 1:
+        raise AssertionError("the K1a probe's block material moved")
+    return base.replace(_C._SOFT_BLOCK_MAT, _C._ADHESIVE_BLOCK_MAT)
+
+
+def _eroding_s2s(ssid, sstyp, msid, mstyp, extra=""):
+    """An *CONTACT_ERODING_SURFACE_TO_SURFACE_ID 12 on the K1a probe."""
+    return _eroding_deck(_C._k1a_s2s(
+        12, ssid=ssid, msid=msid, sstyp=sstyp, mstyp=mstyp,
+        kw="CONTACT_ERODING_SURFACE_TO_SURFACE_ID", tail=_row(0, 1, 1) + "\n"),
+        extra)
+
+
+#: *SET_SEGMENT 50 = the K1a block's four top faces (nodes 10 - 18, z 2.0)
+_BLOCK_TOP_SEGMENTS = ("*SET_SEGMENT\n" + _row(50) + "\n"
+                       + _row(10, 11, 14, 13) + "\n" + _row(11, 12, 15, 14)
+                       + "\n" + _row(13, 14, 17, 16) + "\n"
+                       + _row(14, 15, 18, 17) + "\n")
+
+
+class ErodingMainSideSurfatyp67(unittest.TestCase):
+    """J_ero_drop_main67 (6.34 (4)(e)): the MAIN side of an eroding
+    surface-to-surface card with SURFBTYP 6 / 7 is dropped by the type's
+    meaning and remedy (the twin of ErodingRouteScope's SECONDARY-side
+    test), not as 'resolved to no contact surface'."""
+
+    def test_the_main_side_is_dropped_by_its_meaning(self):
+        for mstyp, meaning, remedy in (
+                (6, "SURFATYP 6 means 'Part set ID for exempted parts",
+                 "REMEDY: invert *SET_PART 2 by hand"),
+                (7, "SURFATYP 7 means 'Branch ID; see *SET_PART_TREE'",
+                 "REMEDY: list the branch's parts in a *SET_PART")):
+            with self.subTest(mstyp=mstyp):
+                res, st, _e = _convert(_eroding_s2s(1, 2, 2, mstyp))
+                self.assertNotIn("/INTER/TYPE25/12", st)
+                head = ("*CONTACT_ERODING_SURFACE_TO_SURFACE 12: the MAIN "
+                        "(MSID) side msid=2")
+                drops = [w for w in res.warnings if w.startswith(head)]
+                self.assertEqual(len(drops), 1, res.warnings)
+                self.assertTrue(drops[0].startswith(head + ": " + meaning),
+                                drops[0])
+                for needle in ("the eroding /INTER/TYPE25 route builds its "
+                               "surface from a part, a part set or SURFATYP "
+                               "5 only", remedy):
+                    self.assertIn(needle, drops[0])
+                self.assertNotIn("resolved to no contact surface", drops[0])
+
+
+class ErodingMainSideWrittenPartsNamed(unittest.TestCase):
+    """J_ero_written_main (6.34 (4)(f)): the MAIN side's written parts feed
+    the B6 sentence. SURFBTYP 5 has no part form in _contact_master_pids,
+    which ``ish_pids`` reads (the 0 / 1 / 2 / 3 forms only), so on SSID =
+    the cards (*SET_PART 1) and MSID 0 / SURFBTYP 5 only the main surface
+    k2rad writes - every part, the LAW169 block among them - reaches part 1."""
+
+    def test_the_law169_part_of_the_written_main_surface_is_named(self):
+        from k2rad.writer import contacts
+        deck = _eroding_s2s(1, 2, 0, 5)
+        st = _t7._dispatch(deck)
+        self.assertEqual(contacts._contact_master_pids(st, 0, 5), set())
+        self.assertEqual(contacts._contact_master_pids(st, 1, 2), {101, 102})
+        res, s, _e = _convert(deck)
+        self.assertIn("/INTER/TYPE25/12", s)
+        ws = _C._type25_law_lines(res)
+        self.assertEqual(len(ws), 1, res.warnings)
+        self.assertIn("/INTER/TYPE25 12: part 1 (/MAT/LAW169", ws[0])
+
+
+class ErodingSegmentSetSidePartNamed(unittest.TestCase):
+    """J_ero_law_written_only (6.34 (4)(g)): a *SET_SEGMENT side adds no part
+    to the written set (_type25_surface writes it as a /SURF/SEG: it names
+    segments, not parts), so the LAW169 part whose faces it holds is reached
+    by ``ish_pids`` alone (_styp01_side_pids). ``law_pids = ish_pids |
+    written`` keeps that naming (findings 6.34 (2)); ``written`` alone loses
+    it."""
+
+    def test_a_segment_set_over_the_law169_block_names_it(self):
+        single = _eroding_deck(_C._k1a_ass(
+            12, 50, 0, kw="CONTACT_ERODING_SINGLE_SURFACE_ID",
+            tail=_row(0, 1, 1) + "\n"), _BLOCK_TOP_SEGMENTS)
+        for side, deck in (("the MSID of a surface-to-surface card",
+                            _eroding_s2s(1, 2, 50, 0, _BLOCK_TOP_SEGMENTS)),
+                           ("the SSID of a single-surface card", single)):
+            with self.subTest(side=side):
+                res, st, _e = _convert(deck)
+                self.assertIn("/INTER/TYPE25/12", st)
+                self.assertIn("/SURF/SEG/", st)
+                ws = _C._type25_law_lines(res)
+                self.assertEqual(len(ws), 1, res.warnings)
+                self.assertIn("/INTER/TYPE25 12: part 1 (/MAT/LAW169", ws[0])
 
 
 if __name__ == "__main__":
