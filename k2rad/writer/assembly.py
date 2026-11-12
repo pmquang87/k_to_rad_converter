@@ -3863,18 +3863,130 @@ def _positive_dt2ms_clause(state: ConversionState, ts) -> Tuple[bool, str]:
         "9's NOT list, entry 5 'Positive DT2MS on 3-D decks').")
 
 
-def _tssfac_for_dt2ms(ts) -> Tuple[float, str]:
+#: Vol I R17 p.12-588 / 12-589, *CONTROL_TIMESTEP Remark 1: LS-DYNA's
+#: default TSSFAC depends on the deck (R14 round 10, fix round)
+_REMARK1 = "Vol I R17 p.12-588 / 12-589 Remark 1"
+
+
+def _contacts_present(state: ConversionState) -> bool:
+    """Remark 1 a's 'contacts are present': a contact k2rad reads in any
+    container, or a ``*CONTACT_`` keyword it skips (LS-DYNA still has it)."""
+    from .contacts import _deck_has_contact_record
+    return _deck_has_contact_record(state) or any(
+        str(k).upper().lstrip("*").startswith("CONTACT_")
+        for k in state.skipped_keywords)
+
+
+def _ls_default_tssfac(state: ConversionState) -> Tuple[float, str, str]:
+    """``(LS-DYNA's default TSSFAC on this deck, the keyword that sets it,
+    the rule)`` by Vol I R17 p.12-588 / 12-589 Remark 1 (R14 round 10, fix
+    round): a) contacts present and ``*CONTROL_CONTACT`` SLSFAC >= 9 ->
+    0.333, 1 <= SLSFAC < 9 -> 0.667; b) ``*INITIAL_DETONATION`` or
+    ``*BOUNDARY_NON_REFLECTING`` -> 0.667; c) 0.90 otherwise (keyword ''). The
+    one place that states the rule, read by the blank-TSSFAC words of the
+    DT2MS < 0 sentence and by :func:`_warn_ls_default_tssfac`. MEASURED: the
+    d3hsp 'time step scale factor' echo equals this rule (or the stated
+    TSSFAC) on all 353 R14 decks that print one."""
+    cc = state.ctrl_contact
+    sls = cc.slsfac if cc is not None else 0.0
+    if sls >= 1.0 and _contacts_present(state):
+        # not '*CONTROL_CONTACT SLSFAC ...': that prefix is the A9
+        # sentence's own (one per deck, counted by it)
+        return ((0.333 if sls >= 9.0 else 0.667),
+                f"*CONTROL_CONTACT with SLSFAC = {sls:g} and contacts present",
+                "a: 0.333 for SLSFAC >= 9, 0.667 for 1 <= SLSFAC < 9 when "
+                "contacts are present")
+    for kw, present in (("*INITIAL_DETONATION", state.detonations),
+                        ("*BOUNDARY_NON_REFLECTING", state.non_reflecting)):
+        if present:
+            return (0.667, kw, "b: 0.667 with *INITIAL_DETONATION or "
+                    "*BOUNDARY_NON_REFLECTING")
+    return (0.9, "", "c: 0.90 - no contact with *CONTROL_CONTACT SLSFAC "
+            ">= 1, no *INITIAL_DETONATION or *BOUNDARY_NON_REFLECTING")
+
+
+def _deck_runs_explicit(state: ConversionState) -> bool:
+    """An engine file of this deck integrates explicitly: an explicit
+    non-modal deck, or an explicit segment of an ``--imflag-curve-restart``
+    chain (an IMFLAG != 0 deck is otherwise written implicit)."""
+    if state.is_modal:
+        return False
+    if not state.is_implicit:
+        return True
+    return any(not s.implicit for s in imflag_restart_segments(state))
+
+
+def ls_tssfac_unconverted(state: ConversionState
+                          ) -> Optional[Tuple[float, str, str]]:
+    """``(LS-DYNA's default TSSFAC, the keyword, the rule)`` when this deck's
+    LS-DYNA default (Remark 1) is not 0.9 and k2rad writes no scale factor
+    for it - TSSFAC blank (or no ``*CONTROL_TIMESTEP``) with DT2MS >= 0, so
+    no ``/DT`` card, on a deck that runs explicit - else None. (DT2MS < 0
+    writes ``/DT/NODA/CST`` Tsca 0.9 and names it in that sentence; a TSSFAC
+    < 0 curve has its own sentence.)"""
+    ts = state.ctrl_timestep
+    if ts is not None and (ts.tssfac != 0.0 or ts.dt2ms < 0.0):
+        return None
+    if not _deck_runs_explicit(state):
+        return None
+    v, kw, rule = _ls_default_tssfac(state)
+    return None if v == 0.9 else (v, kw, rule)
+
+
+def _warn_ls_default_tssfac(state: ConversionState) -> None:
+    """R14 round 10, fix round (findings 6.24 (1)(b)): ONE sentence per deck
+    whose LS-DYNA default TSSFAC (Remark 1 a / b) is not 0.9 while k2rad
+    writes no ``/DT`` scale factor, so OpenRadioss steps at its own default
+    0.9 (0.67 on a routed 2-D deck, ``contrl.F:1148-1149``). Owned by the
+    keyword that sets the class. TEXT ONLY: writing the 0.667 / 0.333 would
+    move the step by 1.35x - 2.7x and no run measures it (ROADMAP, round
+    10's NOT list, entry 6)."""
+    if state.ls_tssfac_named or _engine_implicit(state):
+        return
+    hit = ls_tssfac_unconverted(state)
+    if hit is None:
+        return
+    state.ls_tssfac_named = True
+    v, kw, rule = hit
+    ts = state.ctrl_timestep
+    routed = axisym_routed(state)
+    orv = 0.67 if routed else 0.9
+    where = ("the deck has no *CONTROL_TIMESTEP card" if ts is None else
+             "*CONTROL_TIMESTEP TSSFAC is blank")
+    state.warn(
+        f"{kw} sets LS-DYNA's default time-step scale factor on this deck: "
+        f"{where}, so LS-DYNA steps at TSSFAC = {v:g} ({_REMARK1} {rule}). "
+        "k2rad writes no /DT scale factor here, so OpenRadioss steps at its "
+        f"own default {orv:g}{' on a 2-D deck' if routed else ''} "
+        f"(contrl.F:1148-1149) - {orv / v:.2f}x LS-DYNA's factor, a larger "
+        "explicit step and fewer cycles. Not converted: Tsca "
+        f"{v:g} would change the step and the cycle count by that factor "
+        "and no run has measured it (ROADMAP, round 10's NOT list, entry 6). "
+        "MEASURED: LS-DYNA's d3hsp echoes 'time step scale factor' 0.6670 "
+        "on the R14 decks with SLSFAC 1 / 2.5 or *INITIAL_DETONATION and "
+        "0.3330 on the one with SLSFAC 10.")
+
+
+def _tssfac_for_dt2ms(state: ConversionState, ts) -> Tuple[float, str]:
     """``(TSSFAC as written, the words for a blank one)``: the deck's TSSFAC
-    when > 0, else 0.9 - Vol I R17 p.12-589 Remark 1 c's default; the 0.333 /
-    0.667 of Remark 1 a / b (SLSFAC >= 1 contacts, *INITIAL_DETONATION,
-    *BOUNDARY_NON_REFLECTING) are not reproduced, and a TSSFAC < 0 curve is
-    not converted."""
+    when > 0, else 0.9 - k2rad's and dyna2rad's choice for a blank
+    (convertcards.cxx:166), LS-DYNA's own default only on a Remark 1 c deck;
+    the words name the deck's own default (:func:`_ls_default_tssfac`), and
+    a TSSFAC < 0 curve is not converted."""
     if ts.tssfac and ts.tssfac > 0.0:
         return ts.tssfac, ""
     if ts.tssfac < 0.0:
         return 0.9, (f"TSSFAC {ts.tssfac:g} < 0 (load curve "
                      f"{int(round(-ts.tssfac))}, not converted) -> 0.9; ")
-    return 0.9, "TSSFAC blank -> 0.9; "
+    v, kw, rule = _ls_default_tssfac(state)
+    if v == 0.9:
+        own = (f"here also LS-DYNA's own default, {_REMARK1} {rule}")
+    else:
+        own = (f"LS-DYNA's own default on this deck is {v:g} - {kw}, "
+               f"{_REMARK1} {rule} - so 0.9 is {0.9 / v:.2f}x LS-DYNA's "
+               "factor")
+    return 0.9, ("TSSFAC blank -> 0.9 (k2rad's and dyna2rad's choice, "
+                 f"convertcards.cxx:166; {own}); ")
 
 
 def _tssfac_curve_sentence(state: ConversionState, ts) -> str:
@@ -3918,14 +4030,15 @@ def _dt2ms_tmin(state: ConversionState, ts,
     """``(Tmin, TSSFAC, the words for a blank TSSFAC)`` of a DT2MS < 0 deck:
     the Tmin ``/DT/NODA/CST`` carries (K-41; R14 round 10, A4) - TSSFAC x
     |DT2MS| by default, the minimum step LS-DYNA permits (Vol I R17
-    p.12-585) and the cell dyna2rad writes (convertcards.cxx:173-174);
-    |DT2MS| under ``--no-dt2ms-tssfac-product``. *ams*: the ``/DT/AMS``
+    p.12-585) and the cell dyna2rad writes for a TSSFAC >= 0
+    (convertcards.cxx:166 / 173-174); |DT2MS| under
+    ``--no-dt2ms-tssfac-product``. *ams*: the ``/DT/AMS``
     Tmin, |DT2MS| on both arms, as dyna2rad writes it
     (convertcards.cxx:233-234; the engine runs DTNODAMS there, not
     /DT/NODA/CST's nodal rule, resol.F:5847-5857, and no AMS run measured
     the product). The one source of that number, so a text that restates it
     (the ``/DT/<elem>/DEL`` warning) cannot drift from the card."""
-    tssfac, blank = _tssfac_for_dt2ms(ts)
+    tssfac, blank = _tssfac_for_dt2ms(state, ts)
     if state.options.dt2ms_tssfac_product and not ams:
         return tssfac * abs(ts.dt2ms), tssfac, blank
     return abs(ts.dt2ms), tssfac, blank
@@ -3952,11 +4065,16 @@ def _dt2ms_step_clause(state: ConversionState, ts, tssfac: float,
     # below Tmin (dtnoda.F:654-655), so a deck whose nodal steps all exceed
     # Tmin keeps its own, larger step.
     if state.options.dt2ms_tssfac_product:
-        # R14 round 10, A4: the default since round 10
+        # R14 round 10, A4: the default since round 10. dyna2rad replaces
+        # only a 0.0 TSSFAC (convertcards.cxx:166), so its product equals
+        # this one only for a TSSFAC >= 0 (fix round, F5)
+        dyna = ("dyna2rad writes the same product, convertcards.cxx:173-174"
+                if ts.tssfac >= 0.0 else
+                "dyna2rad keeps the negative curve id as the factor of its "
+                "product, convertcards.cxx:166 / 173-174")
         return (f" {blank}Tmin = TSSFAC x |DT2MS| = {tssfac:g} x {d:g} = "
                 f"{tmin:g}, the minimum step LS-DYNA permits (Vol I R17 "
-                "p.12-585; dyna2rad writes the same product, "
-                "convertcards.cxx:173-174): every nodal step below "
+                f"p.12-585; {dyna}): every nodal step below "
                 f"{tmin:g} is lifted to it with added mass (dtnoda.F:257, "
                 "270-303, 654-655). MEASURED on the R14 billet forge (nt 4): "
                 "13889 cycles = LS-DYNA's 13889, KE END +16.99 -> -5.13 %, "
@@ -4224,8 +4342,14 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     and modal have no CFL time step to scale).
 
     DT2MS >= 0 means no mass scaling, but TSSFAC still applies and is handled by
-    _make_engine_timestep_scale below — it used to be dropped on the floor."""
+    _make_engine_timestep_scale below — it used to be dropped on the floor.
+
+    A blank TSSFAC on a deck whose LS-DYNA default is not 0.9 (Remark 1 a /
+    b) is named by _warn_ls_default_tssfac (R14 round 10, fix round; text
+    only)."""
     ts = state.ctrl_timestep
+    if not state.is_modal:
+        _warn_ls_default_tssfac(state)
     if ts is None or _engine_implicit(state) or state.is_modal:
         # round 9, B4: the --shell-in-solid-coupling re-tune's /DT/INTER/CST
         # stands alone on a deck without *CONTROL_TIMESTEP ([] otherwise)

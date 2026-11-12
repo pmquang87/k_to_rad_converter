@@ -1326,6 +1326,20 @@ def _warn_clis_pfac_stiffness(state: ConversionState, cls, inter_id: int,
             "copy, the vacuum RO / the fluid RO for an A7 light fluid)")
     else:
         voids = "; no void or light-fluid part on this card"
+    # R14 round 10, fix round (findings 6.26 (3)): an A7 light fluid in the
+    # CLIS ALE set moves the first engine step to a NODE, which the
+    # element-based dt0 does not model - a sentence, not a refusal (the
+    # opt-in arm on stagnation_A ran with this Stfval and is shipped)
+    light = [p for p, _g, _i, _s, t in side if t == "fsi_vacuum"]
+    nodal = ("" if not light else
+             f" The CLIS ALE set holds the A7 light-fluid part(s) "
+             f"{', '.join(str(p) for p in light)}: the first step of such a "
+             "deck is set by a node, which this element-based estimate does "
+             "not model - measured on stagnation_A the estimate is +22.6 % "
+             "above the engine's first step (1.776e-6 at NODE 1029; 2.176e-6 "
+             "at NODE 1489 without the light fluid, where the estimate came "
+             "within +0.09 % only by coincidence), so the written Stfval is "
+             "0.665 x the PFAC rule's value; the measured arm ran with it.")
     state.warn(
         f"*CONSTRAINED_LAGRANGE_IN_SOLID (slave {cls.slave} / master "
         f"{cls.master}) -> /INTER/TYPE18/{inter_id}: "
@@ -1339,7 +1353,7 @@ def _warn_clis_pfac_stiffness(state: ConversionState, cls, inter_id: int,
         "stiffness on the coupled mass (Vol I R17 p.10-117 / 10-122). "
         + (_A10_2A_MEASURED if state.options.clis_pfac_stiffness else
            "It is the package's third part; the package's measurement is "
-           "the FLOW-TRACKING note's."))
+           "the FLOW-TRACKING note's.") + nodal)
 
 
 #: the six hexahedron faces sdlen3.F hands to slen.F
@@ -2834,7 +2848,13 @@ _A10_PKG_MEASURED = (
     "against the engine's first step 2.044e-7); the arm is sensitive to "
     "it - a 0.2 % change of Stfval (133.10 -> 133.39, the round-10 "
     "research arms on the ed52c93 bytes) moved END IE by 0.37 point "
-    "(+8.50 -> +8.13 %).")
+    "(+8.50 -> +8.13 %). A residual: the plate (part 3) against LS-DYNA's "
+    "matsum at t 5.9992e-4 holds IE 0.809 against 0.4637 (+74.5 %) and KE "
+    "2.629 against 4.6433 (-43.4 %); without the package (the ed52c93 "
+    "bytes, whose global history the part-A-i bytes reproduce) the bird "
+    "never loads the plate (IE / KE 0 / 0) - measured with a /TH/PART added "
+    "to copies of both decks that reproduce the global history to every "
+    "printed digit.")
 
 
 def _aft_tail(state: ConversionState) -> str:

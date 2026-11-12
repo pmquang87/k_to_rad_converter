@@ -542,11 +542,15 @@ Prior history (before this changelog was introduced) is summarized in the
     stated, a value within 0.005 of 5/6 keeps the cell 0 (the starter's own
     5/6, `hm_read_prop01.F:244`: the ~5/6 sections keep their bytes; a 0.83 is
     named as a 0.40 % substitution), a value outside (0, 1] is written 1.0 and
-    named. The cell stays 0 on the sections LS-DYNA does not shear
-    transversely - NIP 1 (one point, no bending, p.41-66; on an N-1 property
-    the starter zeroes Ashear itself, `hm_read_prop01.F:246-259`), the
-    membranes ELFORM 5 / 9 and the 2-D ELFORMs 12-15 / 43 / 44 / 52 / 55 /
-    +-29 (p.41-67) - with its own sentence, and on k2rad's own placeholder
+    named. The cell stays 0 on NIP 1 (one point, no bending, p.41-66; on
+    the N-1 property of a triangle-only NIP-1 section the starter zeroes
+    Ashear itself, `hm_read_prop01.F:246-259`, and the engine integrates no
+    transverse shear, `c3coef3.F:134-137`; a NIP-1 section kept at N 2 runs
+    at the starter's 5/6), on the membranes ELFORM 5 / 9 and the 2-D ELFORMs
+    12-15 / 43 / 44 / 52 / 55 / +-29 (p.41-67) - with its own sentence (the
+    fix round reworded it: it said LS-DYNA does not shear these sections
+    transversely, which no manual page states for NIP 1) - and on k2rad's
+    own placeholder
     sections (`SectionShell.card_given`); BCIZ / DK (ELFORM 3 / 17 / 18) take
     the rule and are named. One rule (`writer/mesh._shrf_rule`) writes the
     cell at both emission sites (the per-section `/PROP/SHELL` and the
@@ -565,11 +569,22 @@ Prior history (before this changelog was introduced) is summarized in the
     models by text only. The 14 match rows among them stay match (26 runs,
     largest END move 1.54 points: sphere1 IE END -1.66 -> -0.12 %; cycle
     ratios 0.9990 - 1.0006); 0 status or verdict flips on 40 measured
-    deviation / not_comparable keys. Three rows move AWAY from LS-DYNA, named:
-    contact.edge IE END -14.17 -> -24.16 %, thick IE END -27.21 -> -33.54 %,
-    transducer KE RMS 15.19 -> 17.28 %; the ring trio and airbag.deploy are
-    perturbation-sensitive (a 1e-6 edit of the cell moves them as much) and
-    no move there is attributed. Outside the roster all 28 of the 28
+    deviation / not_comparable keys. Four rows move AWAY from LS-DYNA,
+    named (the campaign pass, report section 0.36, nt 4): contact.edge IE END
+    -14.17 -> -24.16 % (KE END +13.67 -> +15.89 %), thick IE END -27.21 ->
+    -33.54 %, transducer KE RMS 15.19 -> 17.28 %, and
+    constrained.spotweld.plates at its END only - IE +55.64 -> +89.06 %, KE
+    +30.96 -> -76.40 %: the two OpenRadioss runs' IE agree within 0.10 % to t
+    6.0e-3, the welds release 21 us earlier with Ashear 1 (t 0.0062 against
+    0.006221; LS-DYNA fails them at t 0.00544), the END samples the ringing
+    after the release, and both RMS improve (IE 34.01 -> 30.61 %, KE 34.29 ->
+    24.10 % of the LS peak, n 800); its one-twin band (Ashear 1 -> 1.000001)
+    is 0.0, so the move is A1's. The ring trio's IE END moves lie inside
+    their one-twin bands (45.40 / 8.95 / 8.72 points); their KE END moves
+    (about 0.24 points) and all four metrics of airbag-ii's airbag.deploy (IE
+    END +107.07 -> +111.47 %, KE END +7.38 -> +8.41 %, every move under 4.5
+    points) lie outside them and are A1's by the census rule on one twin.
+    Outside the roster all 28 of the 28
     shell-carrying CardStack run decks move: `run_03` .. `run_21` state SHRF
     1.0 on ELFORM 16 NIP 5 T 0.35 mm, `run_22` .. `run_26` leave it blank on
     ELFORM 2 (the user's pipeline: the round does not edit its recipe). The 4
@@ -597,9 +612,12 @@ Prior history (before this changelog was introduced) is summarized in the
     `/INISHE` stations are written for max(2, NIP)). Both emission sites carry
     the N (`writer/mesh._nip1_one_point_secids`); writer/composites' dropped
     LAW1 `*INTEGRATION_SHELL` sentence names the N = 1 written. MEASURED: a
-    `/SH3N` cantilever (L 100, t 2 mm, P 2 N) - the N-1 strip hangs (tip
-    -81.76 mm in the hold window) where N 2 bends (-0.476139 mm,
-    Euler-Bernoulli 0.47619 mm); on `mat_spring.belted-dummy`, the one R14 carrier
+    `/SH3N` cantilever (L 100, t 2 mm, P 2 N) on the shipped default bytes
+    (97537 cycles, nt 4) - the NIP-1 strips hang (tip -81.9 .. -82.7 mm, the
+    hold-window means -82.747 / -81.946 / -81.905 / -81.905 mm of strips 1 /
+    4 / 8 / 9) where N 2 bends (-0.476139 mm, Euler-Bernoulli 0.47619 mm; the
+    -81.76 mm first shipped was a hand-edited census arm's, fix round); on
+    `mat_spring.belted-dummy`, the one R14 carrier
     (1 key / 1 model; `/PROP/SHELL/20` and `/21` N 2 -> 1), with A1 on the
     same bytes: 110032 cycles = base, IE END +65.73 -> +46.57 % (fifths
     +29.27 / -2.01 / +3.85 / +58.71 / +46.57 at t 0.024 .. 0.12), IE RMS

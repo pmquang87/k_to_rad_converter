@@ -9605,9 +9605,10 @@ class ConvertOptions:
     # elements are all triangles - LS-DYNA's one point, no bending (Vol I R17
     # p.41-66), which no starter switch touches (c3grtails.F:710); a NIP-1
     # section with quadrilaterals or an initial-state record keeps
-    # max(2, NIP) = 2 and is named. MEASURED (R14 round 10): a /SH3N
-    # cantilever's N-1 strip hangs (tip -81.76 mm) where N 2 bends (-0.4761
-    # mm); mat_spring.belted-dummy (the one R14 carrier, 1 key / 1 model)
+    # max(2, NIP) = 2 and is named. MEASURED (R14 round 10, the shipped
+    # default bytes, nt 4): a /SH3N cantilever's NIP-1 strips hang (tip -81.9
+    # .. -82.7 mm) where N 2 bends (-0.4761 mm); mat_spring.belted-dummy (the
+    # one R14 carrier, 1 key / 1 model)
     # with A1: IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the LS
     # peak over its 500 LS times (nt 4). False = max(2, NIP) (ed52c93).
     nip1_one_point: bool = True
@@ -10788,6 +10789,11 @@ class ConversionState:
     # (writer/contacts._warn_slsfac_dropped runs at both exits of
     # _make_interfaces, which a deferred implicit stub calls a second time).
     slsfac_named: bool = False
+    # R14 round 10, fix round: the blank-TSSFAC sentence of a deck whose
+    # LS-DYNA default (Vol I R17 p.12-589 Remark 1 a / b) is not 0.9 was
+    # written (writer/assembly._warn_ls_default_tssfac; once per deck, an
+    # --imflag-curve-restart chain builds several engine files).
+    ls_tssfac_named: bool = False
     # R14 round 10, A8: the Stmin cell each /INTER/TYPE7 was WRITTEN with
     # (writer/contacts._emit_inter_type7), so the K-02 floor sentence reads
     # the card's own value and never claims 1000 where the rigid-tool cap

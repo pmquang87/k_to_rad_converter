@@ -2520,8 +2520,9 @@ def _warn_surfatyp_route(state: ConversionState, c: ContactAutoSingle,
     state.warn(
         f"*{kw} {c.inter_id}: {head}. LS-DYNA leaves spot-weld parts out of "
         f"a SURFATYP {c.sstyp} side; k2rad's surface lists every part as the "
-        "SSID = 0 route does (a /SURF holds no 1-D element, so a spot-weld "
-        "beam adds no segment)." + measured + " --no-surfatyp-all-parts "
+        "SSID = 0 route does (a /SURF holds no 1-D element, so a beam spot "
+        "weld adds no segment; a solid spot-weld part is included and adds "
+        "its faces)." + measured + " --no-surfatyp-all-parts "
         "drops the card as before (round 10).")
 
 
@@ -3161,6 +3162,15 @@ def _warn_slsfac_dropped(state: ConversionState,
     state.slsfac_named = True
     neg = " - a negative value LS-DYNA does not define" if v < 0.0 else ""
     ids = sorted(capped_ids)
+    # R14 round 10, fix round (findings 6.24 (1)(b)): SLSFAC >= 1 also sets
+    # LS-DYNA's default TSSFAC (Remark 1 a); that sentence is its own (the
+    # engine time step's), this one only points at it
+    from .assembly import ls_tssfac_unconverted
+    hit = ls_tssfac_unconverted(state)
+    ts_ref = (" SLSFAC also sets LS-DYNA's default time-step scale factor "
+              f"on this deck ({hit[0]:g}): see the *CONTROL_CONTACT "
+              "time-step sentence." if hit is not None
+              and hit[1].startswith("*CONTROL_CONTACT") else "")
     head = (f"*CONTROL_CONTACT SLSFAC = {v:g}{neg} (Vol I R17 p.12-69: the "
             "scale factor of every sliding-interface penalty; 0 = LS-DYNA's "
             "default 0.1): ")
@@ -3173,13 +3183,13 @@ def _warn_slsfac_dropped(state: ConversionState,
             "(round 10, A8) carries it - Stmax = 2 x LS-DYNA Theory eq. 30.8 "
             "x SLSFAC x SF on /INTER/TYPE7 "
             f"{' / '.join(str(i) for i in ids)} (see each interface's "
-            "note); on every other contact of this deck " + rest)
+            "note); on every other contact of this deck " + rest + ts_ref)
         return
     state.warn(
         head + "no /INTER cell k2rad writes carries it - the reader stores it "
         "and reads back only SHLTHK - so on this deck's contacts " + rest
         + " The rigid-tool penalty cap (round 10, A8) reaches no interface "
-        "of this deck.")
+        "of this deck." + ts_ref)
 
 
 def _report_unconsumed_gapmin(state: ConversionState,
@@ -5577,7 +5587,8 @@ def _warn_tool_cap(state: ConversionState, c: ContactAutoSurf2Surf,
         "max shell diagonal, K = E / (3 (1 - 2 nu)), the median over the "
         f"{cap.n_main} tool and {cap.n_sec} blank shells) x SLSFAC x SF. The "
         "factor 2 undoes the 1/2 an Istf-4 TYPE7 applies per node "
-        "(i7for3.F:976), so the engine's MAX(Stmin, MIN(Km, Ks, Stmax)) "
+        "(i7for3.F:976), so where Stmax binds (the starter's own K above "
+        "it) the engine's MAX(Stmin, MIN(Km, Ks, Stmax)) "
         "(i7cor3.F:277-288) gives each blank node 1/2 K = k_LS" + alone
         + ". --no-rigid-tool-penalty-cap writes Stmax 0.")
 

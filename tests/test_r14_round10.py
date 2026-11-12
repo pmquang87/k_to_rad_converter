@@ -290,8 +290,7 @@ class A1ShrfAshear(unittest.TestCase):
         res, _s, _e = _convert(_plate(shrf="1.0", nip=1), shrf_ashear=False)
         self.assertTrue(_has(_shrf_notes(res), "(--no-shrf-ashear)",
                              "section(s) 1 are NIP-1 / membrane / 2-D "
-                             "sections LS-DYNA does not shear transversely "
-                             "at all, whose cell the default keeps 0 too."))
+                             "sections whose cell the default keeps 0 too."))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -322,7 +321,8 @@ class A2Nip1OnePoint(unittest.TestCase):
                 self.assertTrue(_has(res.warnings, "*SECTION_SHELL 1: NIP 1 "
                                      "on a section of triangles only -> "
                                      "/PROP/SHELL N 1", "c3grtails.F:710",
-                                     "-81.76 mm", "IE END +65.73 -> +46.57 %",
+                                     "-81.9 .. -82.7 mm",
+                                     "IE END +65.73 -> +46.57 %",
                                      "22.79 -> 14.23 %"))
 
     def test_quads_keep_n_2_and_are_named(self):
@@ -900,7 +900,7 @@ _REPLACEMENTS_ROUND_10_A = (
      "is NOT carried to the /PROP/SHELL Ashear cell (--no-shrf-ashear)"),
     ("k2rad/writer/mesh.py",
      "SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0, the "
-     "starter's 5/6) because LS-DYNA does not shear these sections"),
+     "starter's 5/6): NIP 1 is one point with no bending"),
     # (a comment needle is cut at its comment line's end: the guard keeps #)
     ("k2rad/state.py",
      "--no-shrf-ashear): written to the /PROP/SHELL Ashear cell by the rule"),
@@ -992,14 +992,18 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
     _HELP_FIGURES = {
         "--shrf-ashear": ("-0.041 % (L/t 3) / -0.018 % (L/t 5)",
                           "-0.024 / -0.025 %", "all 2642 R14 shell parts",
-                          "hm_read_prop01.F:246-259",
-                          "0 verdict flips, largest END move 1.54 points"),
-        "--nip1-one-point": ("p.41-66", "c3grtails.F:710", "-81.76 mm",
+                          "hm_read_prop01.F:246-259", "c3coef3.F:134-137",
+                          "0 verdict flips, largest END move 1.54 points",
+                          "contact.edge IE END -14.17 -> -24.16 %",
+                          "thick.k IE END -27.21 -> -33.54 %",
+                          "KE RMS 15.19 -> 17.28 %"),
+        "--nip1-one-point": ("p.41-66", "c3grtails.F:710",
+                             "-81.9 .. -82.7 mm",
                              "-0.4761 mm", "110032 cycles",
                              "IE END +65.73 -> +46.57 %",
                              "22.79 -> 14.23 %"),
         "--dt2ms-tssfac-product": ("Vol I R17 p.12-585",
-                                   "convertcards.cxx:173-174",
+                                   "convertcards.cxx:166 / 173-174",
                                    "convertcards.cxx:233-234",
                                    "13889 cycles = LS-DYNA's 13889",
                                    "KE RMS 8.54 -> 1.74 %"),
@@ -2863,6 +2867,251 @@ class Round10RoadmapRecord(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, bullet)
         self.assertNotIn("No engine run measures that case", bullet)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# THE FIX ROUND (the four round-10 validators; findings 6.24 - 6.27)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _ts_deck(slsfac="10.0", extra="",
+             contact="*CONTACT_SURFACE_TO_SURFACE") -> str:
+    """_a9_deck (two shell plates, one *CONTACT card, *CONTROL_CONTACT
+    SLSFAC *slsfac*, no *CONTROL_TIMESTEP) plus *extra* cards."""
+    deck = _a9_deck(slsfac, contact=contact)
+    assert deck.count("*END\n") == 1
+    return deck.replace("*END\n", extra + "*END\n")
+
+
+def _ts_notes(res):
+    """The fix round's sentence (the A9 sentence's pointer says 'also sets
+    ... on this deck (0.333): see ...', so the colon tells them apart)."""
+    return [w for w in res.warnings
+            if "sets LS-DYNA's default time-step scale factor on this deck: "
+            in w]
+
+
+_TS_BLANK = "*CONTROL_TIMESTEP\n" + _row(0.0, "", 0, 0.0, 0.0) + "\n"
+_TS_STATED = "*CONTROL_TIMESTEP\n" + _row(0.0, 0.9, 0, 0.0, 0.0) + "\n"
+_TS_DT2MS = "*CONTROL_TIMESTEP\n" + _row(0.0, "", 0, 0.0, -1.0e-6) + "\n"
+_DET = "*INITIAL_DETONATION\n" + _row(0, 0.0, 0.0, 0.0, 0.0) + "\n"
+_NRF = "*BOUNDARY_NON_REFLECTING\n" + _row(1) + "\n"
+_IMPLICIT_GEN = "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 1.0e-4) + "\n"
+
+
+class LsDefaultTssfacNamed(unittest.TestCase):
+    """Fix round (findings 6.24 (1)(b); the fidelity validator's F1, MAJOR):
+    LS-DYNA's default TSSFAC depends on the deck (Vol I R17 p.12-588 /
+    12-589 Remark 1: a) contacts and *CONTROL_CONTACT SLSFAC >= 9 -> 0.333,
+    1 <= SLSFAC < 9 -> 0.667; b) *INITIAL_DETONATION or
+    *BOUNDARY_NON_REFLECTING -> 0.667; c) 0.90). Where it is not 0.9 and
+    k2rad writes no /DT scale factor (TSSFAC blank, DT2MS >= 0, an explicit
+    run), OpenRadioss steps at its own 0.9 (contrl.F:1148-1149): ONE
+    sentence, owned by the keyword of the class. TEXT ONLY. MEASURED (the
+    fix agent's scanner, raw keyword text with *INCLUDE + the d3hsp echo):
+    10 R14 keys / 8 models carry the class (9 / 7 explicit), the echo equals
+    the rule on all 353 R14 decks that print one."""
+
+    def test_class_a_by_slsfac(self):
+        for sls, value, ratio in (("10.0", "0.333", "2.70x"),
+                                  ("9.0", "0.333", "2.70x"),
+                                  ("2.5", "0.667", "1.35x"),
+                                  ("1.0", "0.667", "1.35x")):
+            for ts, where in (("", "the deck has no *CONTROL_TIMESTEP card"),
+                              (_TS_BLANK, "*CONTROL_TIMESTEP TSSFAC is "
+                                          "blank")):
+                with self.subTest(slsfac=sls, timestep=bool(ts)):
+                    res, st, eng = _convert(_ts_deck(sls, extra=ts))
+                    notes = _ts_notes(res)
+                    self.assertEqual(len(notes), 1, notes)
+                    self.assertTrue(notes[0].startswith(
+                        f"*CONTROL_CONTACT with SLSFAC = {float(sls):g} and "
+                        "contacts present sets LS-DYNA's default time-step "
+                        "scale factor on this deck: " + where), notes[0])
+                    for needle in (f"TSSFAC = {value}",
+                                   "Vol I R17 p.12-588 / 12-589 Remark 1 a",
+                                   "own default 0.9 (contrl.F:1148-1149)",
+                                   f"{ratio} LS-DYNA's factor",
+                                   "round 10's NOT list, entry 6"):
+                        self.assertIn(needle, notes[0])
+                    # the A9 sentence points at it and stays ONE sentence
+                    a9 = _a9_notes(res)
+                    self.assertEqual(len(a9), 1, a9)
+                    self.assertTrue(a9[0].endswith(
+                        "SLSFAC also sets LS-DYNA's default time-step scale "
+                        f"factor on this deck ({value}): see the "
+                        "*CONTROL_CONTACT time-step sentence."), a9[0])
+                    # text only: no /DT card, the bytes of SLSFAC 0.1
+                    self.assertNotIn("/DT", eng.splitlines())
+                    _r, st1, eng1 = _convert(_ts_deck("0.1", extra=ts))
+                    self.assertEqual((st, eng), (st1, eng1))
+
+    def test_class_b_by_detonation_or_non_reflecting(self):
+        for name, extra, owner in (
+                ("detonation", _DET, "*INITIAL_DETONATION"),
+                ("non-reflecting", _NRF, "*BOUNDARY_NON_REFLECTING"),
+                ("both", _DET + _NRF, "*INITIAL_DETONATION")):
+            with self.subTest(case=name):
+                res, _st, eng = _convert(_ts_deck("0.1", extra=extra))
+                notes = _ts_notes(res)
+                self.assertEqual(len(notes), 1, notes)
+                self.assertTrue(notes[0].startswith(
+                    f"{owner} sets LS-DYNA's default time-step scale factor "
+                    "on this deck: the deck has no *CONTROL_TIMESTEP card"),
+                    notes[0])
+                for needle in ("TSSFAC = 0.667", "Remark 1 b",
+                               "1.35x LS-DYNA's factor"):
+                    self.assertIn(needle, notes[0])
+                self.assertNotIn("/DT", eng.splitlines())
+                self.assertFalse(_has(res.warnings, "SLSFAC also sets"))
+
+    def test_class_a_comes_before_class_b(self):
+        res, _st, _e = _convert(_ts_deck("10.0", extra=_DET))
+        notes = _ts_notes(res)
+        self.assertEqual(len(notes), 1, notes)
+        self.assertTrue(notes[0].startswith(
+            "*CONTROL_CONTACT with SLSFAC = 10 and contacts present"))
+        self.assertIn("TSSFAC = 0.333", notes[0])
+
+    def test_the_non_carriers_print_nothing(self):
+        """A stated TSSFAC (the 8.3 / ex_26 class of the roster), SLSFAC 0.1
+        or blank, SLSFAC >= 1 without a contact (Remark 1 a needs one), and an
+        IMPLICIT deck: an implicit run has no explicit step for the factor to
+        scale, so it prints the A9 sentence alone, without the pointer
+        (efg/metal-cutting's class)."""
+        cases = {"stated TSSFAC": _ts_deck("10.0", extra=_TS_STATED),
+                 "stated + detonation": _ts_deck("0.1",
+                                                 extra=_TS_STATED + _DET),
+                 "SLSFAC 0.1": _ts_deck("0.1"),
+                 "SLSFAC blank": _ts_deck(""),
+                 "no contact": _ts_deck("10.0", contact=""),
+                 "implicit": _ts_deck("10.0", extra=_IMPLICIT_GEN)}
+        for name, deck in cases.items():
+            with self.subTest(case=name):
+                res, _st, _eng = _convert(deck)
+                self.assertEqual(_ts_notes(res), [])
+                self.assertFalse(_has(res.warnings, "SLSFAC also sets"))
+        _r, _s, eng = _convert(cases["stated TSSFAC"])
+        self.assertIn("/DT", eng.splitlines())
+        res, _s, _e = _convert(cases["implicit"])
+        self.assertEqual(len(_a9_notes(res)), 1, _a9_notes(res))
+
+    def test_dt2ms_negative_names_the_default_in_its_own_sentence(self):
+        """DT2MS < 0 writes /DT/NODA/CST Tsca 0.9 for a blank TSSFAC - k2rad's
+        and dyna2rad's choice (convertcards.cxx:166); the words name the
+        deck's own LS-DYNA default, and no separate sentence prints."""
+        res, _s, eng = _convert(_ts_deck("10.0", extra=_TS_DT2MS))
+        self.assertEqual(_ts_notes(res), [])
+        self.assertTrue(_has(res.warnings, "TSSFAC blank -> 0.9 (k2rad's and "
+                             "dyna2rad's choice, convertcards.cxx:166; "
+                             "LS-DYNA's own default on this deck is 0.333",
+                             "2.70x LS-DYNA's factor"), res.warnings)
+        res, _s, _e = _convert(_ts_deck("0.1", extra=_TS_DT2MS))
+        self.assertTrue(_has(res.warnings, "TSSFAC blank -> 0.9 (k2rad's and "
+                             "dyna2rad's choice, convertcards.cxx:166; here "
+                             "also LS-DYNA's own default",
+                             "Remark 1 c"), res.warnings)
+
+    def test_the_dyna2rad_product_clause_holds_for_tssfac_ge_0_only(self):
+        """F5: dyna2rad replaces only a 0.0 TSSFAC (convertcards.cxx:166), so
+        on a TSSFAC < 0 curve its product is not k2rad's."""
+        neg = ("*CONTROL_TIMESTEP\n" + _row(0.0, -3.0, 0, 0.0, -1.0e-6)
+               + "\n")
+        res, _s, _e = _convert(_ts_deck("0.1", extra=neg))
+        self.assertTrue(_has(res.warnings, "dyna2rad keeps the negative curve "
+                             "id as the factor of its product"))
+        self.assertFalse(_has(res.warnings, "dyna2rad writes the same "
+                              "product"))
+        pos = ("*CONTROL_TIMESTEP\n" + _row(0.0, 0.9, 0, 0.0, -1.0e-6)
+               + "\n")
+        res, _s, _e = _convert(_ts_deck("0.1", extra=pos))
+        self.assertTrue(_has(res.warnings, "dyna2rad writes the same product, "
+                             "convertcards.cxx:173-174"))
+
+    def test_the_rule_table(self):
+        """_ls_default_tssfac directly: the Remark 1 table by hand."""
+        from k2rad.state import ConversionState, ControlContact
+        from k2rad.writer import assembly
+        st = ConversionState()
+        self.assertEqual(assembly._ls_default_tssfac(st)[0], 0.9)
+        st.ctrl_contact = ControlContact(9.0, 0.0, 1, 0, 1, 0)
+        self.assertEqual(assembly._ls_default_tssfac(st)[0], 0.9)  # no contact
+        st.contacts_type25.append(object())               # any record will do
+        for sls, value in ((9.0, 0.333), (8.99, 0.667), (1.0, 0.667),
+                           (0.99, 0.9), (0.1, 0.9)):
+            with self.subTest(slsfac=sls):
+                st.ctrl_contact = ControlContact(sls, 0.0, 1, 0, 1, 0)
+                self.assertEqual(assembly._ls_default_tssfac(st)[0], value)
+
+
+def _clis_light_fluid_deck() -> str:
+    """The A7 coupon (water part 1, light-fluid vacuum part 2, one AMMG) +
+    a 6 x 6 mm shell plate (part 3) inside the column, coupled to the ALE
+    parts 1 / 2 by *CONSTRAINED_LAGRANGE_IN_SOLID (PFAC 0.1)."""
+    plate = ("*PART\nplate\n" + _row(3, 3, 3) + "\n*SECTION_SHELL\n"
+             + _row(3, 2) + "\n" + _row(0.5, 0.5, 0.5, 0.5)
+             + "\n*MAT_ELASTIC\n" + _row(3, "7.8E-9", "2.0E5", 0.3)
+             + "\n*SET_PART_LIST\n" + _row(3) + "\n" + _row(1, 2)
+             + "\n*CONSTRAINED_LAGRANGE_IN_SOLID\n" + _row(3, 3, 1, 0) + "\n"
+             + _row(0.0, 0.0, 0.1) + "\n*ELEMENT_SHELL\n"
+             + "".join(f"{v:>8}" for v in (101, 3, 101, 102, 103, 104))
+             + "\n*NODE\n" + "".join(
+                 f"{n:8d}{x:16.1f}{y:16.1f}{z:16.1f}\n" for n, x, y, z in (
+                     (101, 2.0, 15.0, 2.0), (102, 2.0, 15.0, 8.0),
+                     (103, 8.0, 15.0, 8.0), (104, 8.0, 15.0, 2.0))))
+    return _a7_coupon(("*END", plate + "*END"))
+
+
+class ClisPfacNodalFirstStep(unittest.TestCase):
+    """Fix round (findings 6.26 (3); the physics validator's F2): an A7 light
+    fluid in the CLIS ALE set moves the first engine step to a NODE, which
+    the element-based dt0 does not model (stagnation_A: +22.6 %); ONE clause
+    in the 2a sentence of such an interface - a sentence, not a refusal;
+    TEXT ONLY on the opt-in path (the default writes no 2a sentence)."""
+
+    _CLAUSE = ("the first step of such a deck is set by a node, which this "
+               "element-based estimate does not model")
+
+    def test_the_clause_on_a_light_fluid_set_under_the_opt_in(self):
+        res, st, _e = _convert(_clis_light_fluid_deck(),
+                               clis_pfac_stiffness=True)
+        notes = [w for w in res.warnings if "Stfval = PFAC x m_node" in w
+                 and w.startswith("*CONSTRAINED_LAGRANGE_IN_SOLID (slave")]
+        self.assertEqual(len(notes), 1, notes)
+        for needle in ("The CLIS ALE set holds the A7 light-fluid part(s) 2",
+                       self._CLAUSE, "+22.6 %", "1.776e-6 at NODE 1029",
+                       "2.176e-6 at NODE 1489", "+0.09 % only by coincidence",
+                       "0.665 x the PFAC rule's value"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, notes[0])
+        # the two interfaces: the fluid's and the light fluid's own
+        self.assertEqual(len([ln for ln in st.splitlines()
+                              if ln.startswith("/INTER/TYPE18/")]), 2)
+
+    def test_no_clause_without_a_light_fluid_or_without_the_opt_in(self):
+        res, _s, _e = _convert(_t9.b8_bird(card=False, clis=True),
+                               clis_pfac_stiffness=True)
+        self.assertTrue(_has(res.warnings, "Stfval = PFAC x m_node"))
+        self.assertFalse(_has(res.warnings, self._CLAUSE))
+        res, st, _e = _convert(_clis_light_fluid_deck())
+        self.assertFalse(_has(res.warnings, self._CLAUSE))
+        self.assertEqual(len([ln for ln in st.splitlines()
+                              if ln.startswith("/INTER/TYPE18/")]), 1)
+
+
+class A10PackagePlateResidual(unittest.TestCase):
+    """Fix round (findings 6.26 (4); the physics validator's F3): the
+    package sentence names the plate's energy split against LS-DYNA's
+    matsum as a residual."""
+
+    def test_the_plate_split_is_named(self):
+        from k2rad.writer import blast_ale
+        text = _t7._collapse(blast_ale._A10_PKG_MEASURED)
+        for needle in ("the plate (part 3)", "t 5.9992e-4",
+                       "IE 0.809 against 0.4637 (+74.5 %)",
+                       "KE 2.629 against 4.6433 (-43.4 %)",
+                       "(IE / KE 0 / 0)"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
 
 
 if __name__ == "__main__":

@@ -1941,8 +1941,9 @@ def convert(
         LS-DYNA's one point, no bending (Vol I R17 p.41-66), which no starter
         switch touches (``c3grtails.F:710``). A NIP-1 section with
         quadrilaterals or an initial-state record keeps max(2, NIP) = 2 and
-        is named. MEASURED: a ``/SH3N`` cantilever's N-1 strip hangs (tip
-        -81.76 mm) where N 2 bends (-0.4761 mm); mat_spring.belted-dummy
+        is named. MEASURED (the shipped default bytes, nt 4): a ``/SH3N``
+        cantilever's NIP-1 strips hang (tip -81.9 .. -82.7 mm) where N 2
+        bends (-0.4761 mm); mat_spring.belted-dummy
         with ``shrf_ashear``: IE END +65.73 -> +46.57 %, IE RMS 22.79 ->
         14.23 % of the LS peak over its 500 LS times (110032 cycles, nt 4).
         Default True (``--no-nip1-one-point``: max(2, NIP)).

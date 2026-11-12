@@ -144,8 +144,12 @@ decks should start from
   since R14 round 10** (it was OFF in the CardStack batch). Hold an explicit
   DT2MS < 0 deck's mass-scaled step at TSSFAC x `|DT2MS|` (the `/DT/NODA/CST`
   Tmin), the minimum step LS-DYNA permits (Vol I R17 p.12-585) and the cell
-  dyna2rad writes (`convertcards.cxx:173-174`), instead of `|DT2MS|`. TSSFAC
-  blank or a curve = 0.9. `/DT/AMS` (`--ams`) keeps Tmin = `|DT2MS|` on both
+  dyna2rad writes for a TSSFAC >= 0 (`convertcards.cxx:166` / `173-174`),
+  instead of `|DT2MS|`. TSSFAC blank or a curve = 0.9 - k2rad's and
+  dyna2rad's choice; LS-DYNA's own default is 0.333 / 0.667 with a contact
+  and `*CONTROL_CONTACT` SLSFAC >= 9 / >= 1, or with `*INITIAL_DETONATION` /
+  `*BOUNDARY_NON_REFLECTING` (Vol I R17 p.12-589 Remark 1), and the warning
+  names the deck's own. `/DT/AMS` (`--ams`) keeps Tmin = `|DT2MS|` on both
   arms, as dyna2rad writes it (`convertcards.cxx:233-234`); its Tsca stays
   0.67. MEASURED on the R14 billet-forge deck (nt 4): the step then equals
   LS-DYNA's 1.08e-7 (1.2e-7 without it), 13889 cycles = LS-DYNA's 13889, KE
@@ -360,18 +364,23 @@ as underscores.
   default 1.0 (Vol I R17 p.41-63), 0 < SHRF <= 1 as stated, a value within
   0.005 of 5/6 as the starter's own 5/6 (the cell 0,
   `hm_read_prop01.F:244`), a value outside (0, 1] as 1.0 with a warning. The
-  cell stays 0 on the sections LS-DYNA does not shear: NIP 1 (one point, no
-  bending; the starter zeroes Ashear under N 1 itself,
-  `hm_read_prop01.F:246-259`), the membranes ELFORM 5 / 9, the 2-D ELFORMs
-  12-15, 43, 44, 52, 55, +-29 and k2rad's own placeholder sections; each kept
-  or substituted value is named. The `/PROP/TYPE9` / `TYPE11` / `TYPE51`
-  routes keep their own rules. MEASURED: each Ashear reproduces its own
-  Timoshenko closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on quads and
-  -0.024 / -0.025 % on triangles; LS-DYNA's d3hsp echoes `shear area factor =
-  1.0` on all 2642 R14 shell parts with a blank, 0 or 1.0 SHRF; 148 R14 keys
-  / 132 models move by bytes, and the 14 match rows among them stay match
-  (largest END move 1.54 points). `--no-shrf-ashear` writes Ashear 0 (the
-  starter's 5/6) everywhere.
+  cell stays 0 on NIP 1 (one point, no bending, Vol I R17 p.41-66; on the N-1
+  property the starter zeroes Ashear itself, `hm_read_prop01.F:246-259`, and
+  the engine integrates no transverse shear, `c3coef3.F:134-137`; a NIP-1
+  section kept at N 2 runs at the starter's 5/6), on the membranes ELFORM 5 /
+  9, the 2-D ELFORMs 12-15, 43, 44, 52, 55, +-29 and k2rad's own placeholder
+  sections; each kept or substituted value is named. The `/PROP/TYPE9` /
+  `TYPE11` / `TYPE51` routes keep their own rules. MEASURED: each Ashear
+  reproduces its own Timoshenko closed form to -0.041 % (L/t 3) / -0.018 %
+  (L/t 5) on quads and -0.024 / -0.025 % on triangles; LS-DYNA's d3hsp echoes
+  `shear area factor = 1.0` on all 2642 R14 shell parts with a blank, 0 or
+  1.0 SHRF; 148 R14 keys / 132 models move by bytes, and the 14 match rows
+  among them stay match (largest END move 1.54 points). The named losses
+  (nt 4): contact.edge IE END -14.17 -> -24.16 % (KE END +13.67 -> +15.89
+  %), thick.k IE END -27.21 -> -33.54 %, the transducer KE RMS 15.19 ->
+  17.28 %, and constrained.spotweld.plates at its END only (IE +55.64 ->
+  +89.06 %, KE +30.96 -> -76.40 %; both RMS improve). `--no-shrf-ashear`
+  writes Ashear 0 (the starter's 5/6) everywhere.
 - `--nip1-one-point` / `--no-nip1-one-point` — **ON by default**. Write
   `/PROP/SHELL` N 1 on a `*SECTION_SHELL` with NIP 1 (stated, or a one-point
   `*INTEGRATION_SHELL`) whose shell elements are all triangles: LS-DYNA's one
@@ -380,9 +389,10 @@ as underscores.
   `hm_read_prop01.F:246-259`). A NIP-1 section with quadrilaterals keeps N 2
   and is named (the one-point QBAT path diverged at the default step in the
   round-10 probes: ENERGY ERROR at cycles 81-88 on a cantilever), as is one
-  an initial-state record names. MEASURED: a `/SH3N` cantilever's N-1 strip
-  hangs (tip -81.76 mm) where N 2 bends (-0.4761 mm, Euler-Bernoulli 0.47619
-  mm); on `mat_spring.belted-dummy` (the one R14 carrier) with
+  an initial-state record names. MEASURED (the shipped default bytes, nt 4):
+  a `/SH3N` cantilever's NIP-1 strips hang (tip -81.9 .. -82.7 mm, the
+  hold-window mean) where N 2 bends (-0.4761 mm, Euler-Bernoulli 0.47619 mm);
+  on `mat_spring.belted-dummy` (the one R14 carrier) with
   `--shrf-ashear`: IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the
   LS peak over its 500 LS times (110032 cycles, nt 4). `--no-nip1-one-point`
   writes max(2, NIP).
@@ -7103,19 +7113,27 @@ d3hsp echoes `shear area factor = 1.0` on all 2642 shell parts whose SHRF is
 blank, 0 or 1.0), 0 < SHRF <= 1 as stated, a value within 0.005 of 5/6 as the
 starter's own 5/6 (the cell 0, `hm_read_prop01.F:244`: the ~5/6 sections keep
 their bytes; a 0.83 is named as a 0.40 % substitution), a value outside
-(0, 1] as 1.0 with a warning. The cell stays 0 on the sections LS-DYNA does
-not shear transversely - NIP 1 (one point, no bending, p.41-66; on an N-1
-property the starter zeroes Ashear itself, `hm_read_prop01.F:246-259`), the
-membranes ELFORM 5 / 9 and the 2-D ELFORMs 12-15, 43, 44, 52, 55, +-29
-(p.41-67) - with a sentence that says why, and on k2rad's own placeholder
-sections; the BCIZ / DK ELFORMs 3 / 17 / 18, which LS-DYNA does not apply
-SHRF to, take the rule and are named. Both emission sites carry the cell (the
-per-section property and the per-part `*HOURGLASS` split). MEASURED: each
-Ashear reproduces its own Timoshenko closed form to -0.041 % (L/t 3) /
--0.018 % (L/t 5) on quads and -0.024 / -0.025 % on `/SH3N` triangles (a
-clamped cantilever, explicit and implicit, nt 4 = nt 2); 148 R14 keys / 132
-models move by the Ashear cells only, and the 14 match rows among them stay
-match (largest END move 1.54 points). `--no-shrf-ashear` writes Ashear 0
+(0, 1] as 1.0 with a warning. The cell stays 0 on NIP 1 (one point, no
+bending, p.41-66; on the N-1 property k2rad writes for a triangle-only NIP-1
+section the starter zeroes Ashear itself, `hm_read_prop01.F:246-259`, and
+the engine integrates no transverse shear, `c3coef3.F:134-137`; a NIP-1
+section kept at N 2 runs at the starter's 5/6), on the membranes ELFORM 5 /
+9 and the 2-D ELFORMs 12-15, 43, 44, 52, 55, +-29 (p.41-67) - with a
+sentence that says why - and on k2rad's own placeholder sections; the BCIZ /
+DK ELFORMs 3 / 17 / 18, which LS-DYNA does not apply SHRF to, take the rule
+and are named. Both emission sites carry the cell (the per-section property
+and the per-part `*HOURGLASS` split). MEASURED: each Ashear reproduces its
+own Timoshenko closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on quads
+and -0.024 / -0.025 % on `/SH3N` triangles (a clamped cantilever, explicit
+and implicit, nt 4 = nt 2); 148 R14 keys / 132 models move by the Ashear
+cells only, and the 14 match rows among them stay match (largest END move
+1.54 points); four rows move AWAY from LS-DYNA, each named in CHANGELOG
+(nt 4): contact.edge IE END -14.17 -> -24.16 % (KE END +13.67 -> +15.89 %),
+thick.k IE END -27.21 -> -33.54 %, the transducer KE RMS 15.19 -> 17.28 %,
+and constrained.spotweld.plates at its END only (IE +55.64 -> +89.06 %, KE
++30.96 -> -76.40 %: its welds release 21 us earlier and the END samples the
+ringing after the release, while both RMS improve, IE 34.01 -> 30.61 %, KE
+34.29 -> 24.10 %). `--no-shrf-ashear` writes Ashear 0
 everywhere (the starter's 5/6) and names every section that then runs at 5/6
 where LS-DYNA does not, stated or blank.
 Under-integrated `Ishell=1..4` is deliberately not offered: it would activate

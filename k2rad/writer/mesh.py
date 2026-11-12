@@ -2655,8 +2655,9 @@ def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
       ``c3grtails.F:710``). MEASURED (starter + engine, nt 1, 2026-10-31): a
       NIP-1 *MAT_ELASTIC quad strip is written N 2 on both K-31 arms and
       prints 1 x WARNING 1084 on both (anim files byte-equal, T01 equal);
-      (R14 round 10) a /SH3N cantilever's N-1 strip hangs (tip -81.76 mm)
-      where N 2 bends (-0.4761 mm, Euler-Bernoulli 0.47619 mm);
+      (R14 round 10, on the shipped default bytes, nt 4) a /SH3N
+      cantilever's NIP-1 strips hang (tip -81.9 .. -82.7 mm, the hold-window
+      mean) where N 2 bends (-0.4761 mm, Euler-Bernoulli 0.47619 mm);
     * no ``*INITIAL_STRESS_SHELL`` / ``*INITIAL_STRAIN_SHELL`` record names
       one of its elements, directly or through a ``*SET_SHELL``: an /INISHE
       record carries one station per through-thickness point and
@@ -5683,23 +5684,25 @@ def _warn_shell_shrf(state: ConversionState,
                f"; section(s) {', '.join(str(i) for i in unsheared[:10])}"
                + (f", ... ({len(unsheared)} sections)"
                   if len(unsheared) > 10 else "")
-               + " are NIP-1 / membrane / 2-D sections LS-DYNA does not "
-               "shear transversely at all, whose cell the default keeps 0 "
-               "too") + ".")
+               + " are NIP-1 / membrane / 2-D sections whose cell the "
+               "default keeps 0 too") + ".")
         return
     excl = notes.get("excluded")
     if excl:
         state.warn(
             f"*SECTION_SHELL {_shrf_ids(_shrf_groups(excl, _shrf_excl_label))}"
             ": SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0, "
-            "the starter's 5/6) because LS-DYNA does not shear these sections "
-            "transversely: NIP 1 is one point with no bending (Vol I R17 "
-            "p.41-66), and on an N-1 property the starter zeroes Ashear "
-            "itself (hm_read_prop01.F:246-259); a membrane ELFORM 5 / 9 has "
-            "no bending; on a two-dimensional ELFORM (12-15, 43, 44, 52, 55, "
-            "+-29) the through-thickness integration is not meaningful (Vol I "
-            "R17 p.41-67). LS-DYNA's d3hsp still echoes the factor on such "
-            "parts.")
+            "the starter's 5/6): NIP 1 is one point with no bending (Vol I R17 "
+            "p.41-66) - on the N-1 property k2rad writes for a triangle-only "
+            "NIP-1 section the starter zeroes Ashear itself "
+            "(hm_read_prop01.F:246-259) and the engine integrates no "
+            "transverse shear (c3coef3.F:134-137), while a NIP-1 section "
+            "kept at N 2 (quadrilaterals, an initial state, "
+            "--no-nip1-one-point) runs at the starter's 5/6; a membrane "
+            "ELFORM 5 / 9 has no bending; on a two-dimensional ELFORM (12-15, "
+            "43, 44, 52, 55, +-29) the through-thickness integration is not "
+            "meaningful (Vol I R17 p.41-67). LS-DYNA's d3hsp still echoes the "
+            "factor on such parts.")
     kir = notes.get("kirchhoff")
     if kir:
         state.warn(
@@ -5708,8 +5711,10 @@ def _warn_shell_shrf(state: ConversionState,
             "1.0) although LS-DYNA's BCIZ (ELFORM 3) and DK (17, 18) elements "
             "do not use it (Vol I R17 p.41-66: they are not first-order "
             "shear-deformation shells). k2rad writes these Kirchhoff-type "
-            "shells as the Mindlin /PROP/SHELL Ishell 12 / 24, on which the "
-            "larger factor is the nearer stand-in for a shear-rigid element.")
+            "shells as Mindlin /PROP/SHELL elements - Ishell 12 / 24 on the "
+            "quadrilaterals, Ish3n 0 (the starter's default triangle, "
+            "hm_read_prop01.F:193) on the triangles - on which the larger "
+            "factor is the nearer stand-in for a shear-rigid element.")
     win = notes.get("window")
     if win:
         groups = _shrf_groups(win, _shrf_label)
@@ -5768,9 +5773,10 @@ def _warn_nip1_one_point(state: ConversionState, one_point: FrozenSet[int],
             "transverse shear at one point (mulawc.F90:760-765, "
             "c3coef3.F:134-137), no starter switch acts on N 1 "
             "(c3grtails.F:710) and the starter zeroes Ashear there "
-            "(hm_read_prop01.F:246-259). MEASURED on a /SH3N cantilever: the "
-            "N-1 strip hangs (tip -81.76 mm in the hold window) where N 2 "
-            "bends (-0.4761 mm, Euler-Bernoulli 0.47619 mm); on "
+            "(hm_read_prop01.F:246-259). MEASURED on a /SH3N cantilever "
+            "(these default bytes, nt 4): the NIP-1 strips hang (tip -81.9 "
+            ".. -82.7 mm, the hold-window mean) where N 2 bends (-0.4761 mm, "
+            "Euler-Bernoulli 0.47619 mm); on "
             "mat_spring.belted-dummy (the one R14 carrier) with the SHRF rule: "
             "IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the LS "
             "peak over its 500 LS times (110032 cycles, nt 4). "
