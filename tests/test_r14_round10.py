@@ -3302,7 +3302,7 @@ class Round10FixRoundRecord(unittest.TestCase):
                  for a, b in zip(starts, starts[1:] + [e])}
         for needle in ("10 keys / 8 models", "9 explicit keys / 7 models",
                        "0.3330", "contrl.F:1148-1149", "Remark 1",
-                       "1.35x - 2.7x", "13 / 13 decks, 6 / 6 with a blank "
+                       "1.35x - 2.70x", "13 / 13 decks, 6 / 6 with a blank "
                        "TSSFAC"):
             with self.subTest(entry=6, needle=needle):
                 self.assertIn(needle, block[6])

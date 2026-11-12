@@ -3286,7 +3286,7 @@ its measured class (pan.drawbead IE RMS 10.85 → 4.01 %; the anisotropic
 cup-draw's KE END −42.14 → −49.31 % named; on pan.drawbead the default trips
 the launcher's strict audit - FLAG energy-error-clamped on 569 of 2511 rows,
 the one roster row that newly does - where the energy balance with the
-contact energy added reads 0.918 → 0.782 at END, 21.8 % of the external work
+contact energy added reads 0.9184 → 0.7818 at END, 21.8 % of the external work
 unaccounted against 8.2 % on `ed52c93`, an absolute residual that falls
 2.546e6 → 1.720e6; A8 stays the default, the README A8 bullet says how to run
 it under the strict audit); A9 SLSFAC named; A10 the
@@ -3384,7 +3384,7 @@ as N keys / M models on the 356-key / 312-model roster.
    echo equals the rule on all 353 R14 decks that print one): the class
    carries 10 keys / 8 models - underwater_A .. _F (`*INITIAL_DETONATION`,
    0.6670), contact.projectile and projectile (SLSFAC 1, 0.6670), proj-errod
-   (SLSFAC 10, 0.3330: OpenRadioss steps at 2.7x LS-DYNA's factor) and
+   (SLSFAC 10, 0.3330: OpenRadioss steps at 2.70x LS-DYNA's factor) and
    efg/metal-cutting (SLSFAC 2.5, 0.6670; implicit, so no step to scale) -
    none with a `*CONTROL_TIMESTEP` card, so k2rad writes no `/DT` and each
    explicit carrier (9 keys / 7 models) runs at 0.9; since the fix round each
@@ -3392,7 +3392,7 @@ as N keys / M models on the 356-key / 312-model roster.
    first record holds for the DT2MS < 0 class only: 13 / 13 decks, 6 / 6 with
    a blank TSSFAC, none of them a carrier. Next: writing the deck's own factor
    as the `/DT` Tsca - it moves the 9 explicit keys / 7 models by bytes and
-   their step and cycle count by 1.35x - 2.7x, and no run measures it yet (a
+   their step and cycle count by 1.35x - 2.70x, and no run measures it yet (a
    round-11 candidate); one `--ams` arm on the billet forge.
 7. **The LS-faithful erosion card** (the rest of A11, recorded here rather
    than as an entry of its own): k2rad's corrected rule writes no

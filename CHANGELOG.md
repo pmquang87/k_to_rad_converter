@@ -72,11 +72,11 @@ Prior history (before this changelog was introduced) is summarized in the
     step scale factor`; the echo equals the rule on all 353 R14 decks that
     print one): 10 keys / 8 models carry the class - underwater_A .. _F
     (0.6670), contact.projectile and projectile (SLSFAC 1, 0.6670),
-    proj-errod (SLSFAC 10, 0.3330: OpenRadioss steps at 2.7x LS-DYNA's
+    proj-errod (SLSFAC 10, 0.3330: OpenRadioss steps at 2.70x LS-DYNA's
     factor) and efg/metal-cutting (SLSFAC 2.5; implicit, so nothing is
     printed there) - 9 explicit keys / 7 models get the sentence. Writing
     the factor is NOT in this round: it would move those 9 / 7 by bytes and
-    their cycle counts by 1.35x - 2.7x, and no run measures it (ROADMAP,
+    their cycle counts by 1.35x - 2.70x, and no run measures it (ROADMAP,
     round 10's NOT list, entry 6, corrected: its first record said 0
     carriers, which holds for the DT2MS < 0 class only). F5: the DT2MS < 0
     blank-TSSFAC words now say 0.9 is k2rad's and dyna2rad's choice
