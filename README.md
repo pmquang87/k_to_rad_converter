@@ -379,8 +379,12 @@ as underscores.
   (nt 4): contact.edge IE END -14.17 -> -24.16 % (KE END +13.67 -> +15.89
   %), thick.k IE END -27.21 -> -33.54 %, the transducer KE RMS 15.19 ->
   17.28 %, and constrained.spotweld.plates at its END only (IE +55.64 ->
-  +89.06 %, KE +30.96 -> -76.40 %; both RMS improve). `--no-shrf-ashear`
-  writes Ashear 0 (the starter's 5/6) everywhere.
+  +89.06 %, KE +30.96 -> -76.40 %: its welds release 21 us earlier and the
+  END samples the ringing after the release, while both RMS improve, IE
+  34.01 -> 30.61 %, KE 34.29 -> 24.10 %); with them airbag-ii's
+  airbag.deploy KE END +7.38 -> +8.41 % (1.0313 points against its one-twin
+  band of 1.031). `--no-shrf-ashear` writes Ashear 0 (the starter's 5/6)
+  everywhere.
 - `--nip1-one-point` / `--no-nip1-one-point` — **ON by default**. Write
   `/PROP/SHELL` N 1 on a `*SECTION_SHELL` with NIP 1 (stated, or a one-point
   `*INTEGRATION_SHELL`) whose shell elements are all triangles: LS-DYNA's one
@@ -7179,7 +7183,9 @@ thick.k IE END -27.21 -> -33.54 %, the transducer KE RMS 15.19 -> 17.28 %,
 and constrained.spotweld.plates at its END only (IE +55.64 -> +89.06 %, KE
 +30.96 -> -76.40 %: its welds release 21 us earlier and the END samples the
 ringing after the release, while both RMS improve, IE 34.01 -> 30.61 %, KE
-34.29 -> 24.10 %). `--no-shrf-ashear` writes Ashear 0
+34.29 -> 24.10 %), and with them airbag-ii's airbag.deploy KE END +7.38 ->
++8.41 % (1.0313 points against its one-twin band of 1.031).
+`--no-shrf-ashear` writes Ashear 0
 everywhere (the starter's 5/6) and names every section that then runs at 5/6
 where LS-DYNA does not, stated or blank.
 Under-integrated `Ishell=1..4` is deliberately not offered: it would activate

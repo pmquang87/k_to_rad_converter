@@ -3262,7 +3262,13 @@ campaign rule (the LAST row of a printed time; an equidistant fifth takes the
 earlier time) and the RMS over the LS times 0 < t <= OpenRadioss's last row,
 the window named. Part A-i: A1 SHRF → `/PROP/SHELL` Ashear by default with
 the NIP-1 / membrane / 2-D exclusion (`--no-shrf-ashear`; 0 verdict flips on
-the 14 match rows); A2 NIP 1 → N 1 on triangle-only sections (the belted
+the 14 match rows; four rows move away from LS-DYNA, named in CHANGELOG -
+contact.edge IE END −14.17 → −24.16 % and KE END +13.67 → +15.89 %, thick.k
+IE END −27.21 → −33.54 %, the transducer KE RMS 15.19 → 17.28 %, and
+constrained.spotweld.plates at its END only, IE +55.64 → +89.06 %, KE +30.96
+→ −76.40 %, its welds released 21 us earlier while both RMS improve; with
+them airbag-ii's KE END +7.38 → +8.41 %, 1.0313 points against its one-twin
+band of 1.031); A2 NIP 1 → N 1 on triangle-only sections (the belted
 dummy IE END +65.73 → +46.57 %, RMS 22.79 → 14.23 % with A1); A3 the texts
 that ride them; A4 TSSFAC x `|DT2MS|` on `/DT/NODA/CST` by default (the
 billet forge 12500 → 13889 cycles = LS, KE RMS 8.54 → 1.74 %: deviation →

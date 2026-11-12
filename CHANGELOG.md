@@ -101,8 +101,10 @@ Prior history (before this changelog was introduced) is summarized in the
   - **The campaign validator's A1 rows.** constrained.spotweld.plates moves
     AWAY at its END only (named in the A1 entry below with its measured
     cause: the welds release 21 us earlier; both RMS improve); contact.edge's
-    KE END move is named; airbag-ii's four metrics and the ring trio's KE END
-    lie outside their one-twin bands and are A1's by the census rule.
+    KE END move is named beside its IE END; airbag-ii's KE END +7.38 ->
+    +8.41 % is named with the rows that move away, its band beside it; the
+    band sentence says what one twin covers and what it does not (a one-twin
+    band is a lower bound of the scatter).
   - **The physics validator's minors.** The 2a sentence of a CLIS set with an
     A7 light fluid names the nodal first step the element-based estimate does
     not model (stagnation_A +22.6 %: the written Stfval is 0.665 x the
@@ -671,19 +673,31 @@ Prior history (before this changelog was introduced) is summarized in the
     ratios 0.9990 - 1.0006); 0 status or verdict flips on 40 measured
     deviation / not_comparable keys. Four rows move AWAY from LS-DYNA,
     named (the campaign pass, report section 0.36, nt 4): contact.edge IE END
-    -14.17 -> -24.16 % (KE END +13.67 -> +15.89 %), thick IE END -27.21 ->
+    -14.17 -> -24.16 % and KE END +13.67 -> +15.89 %, thick IE END -27.21 ->
     -33.54 %, transducer KE RMS 15.19 -> 17.28 %, and
     constrained.spotweld.plates at its END only - IE +55.64 -> +89.06 %, KE
-    +30.96 -> -76.40 %: the two OpenRadioss runs' IE agree within 0.10 % to t
-    6.0e-3, the welds release 21 us earlier with Ashear 1 (t 0.0062 against
-    0.006221; LS-DYNA fails them at t 0.00544), the END samples the ringing
-    after the release, and both RMS improve (IE 34.01 -> 30.61 %, KE 34.29 ->
-    24.10 % of the LS peak, n 800); its one-twin band (Ashear 1 -> 1.000001)
-    is 0.0, so the move is A1's. The ring trio's IE END moves lie inside
-    their one-twin bands (45.40 / 8.95 / 8.72 points); their KE END moves
-    (about 0.24 points) and all four metrics of airbag-ii's airbag.deploy (IE
-    END +107.07 -> +111.47 %, KE END +7.38 -> +8.41 %, every move under 4.5
-    points) lie outside them and are A1's by the census rule on one twin.
+    +30.96 -> -76.40 % (the scored KE, translational + rotational, 979.49 ->
+    176.48 against LS-DYNA's 747.951; IE 3428 -> 4164 against 2202.51). Its
+    cause, measured: the two OpenRadioss runs agree within 0.10 % in IE up to
+    t 6.0e-3; the welds release at t 0.006221 (cycle 16893) on the Ashear-0
+    bytes and at t 0.006200 (cycle 16834) on the Ashear-1 bytes - 21 us
+    earlier (LS-DYNA fails them at 0.0054408 .. 0.0054475, a gap older than
+    round 10 that A1 does not touch); after the release IE and KE ring and the
+    END row samples another phase of it; over the whole history the row
+    moves TOWARD LS-DYNA (IE RMS 34.01 -> 30.61 %, KE RMS 34.29 -> 24.10 % of
+    the LS peak, n 800, window (8.40907e-06, 0.00799978]); its one-twin band
+    (Ashear 1 -> 1.000001) is 0.0 points, so the move is A1's. With them
+    airbag-ii's airbag.deploy KE END +7.38 -> +8.41 % (1.0313 points against
+    its one-twin band of 1.031). The band carriers, ONE eps twin each (Ashear
+    1 -> 1.000001, nt 4; a one-twin band is a LOWER bound of the scatter; max
+    band 45.40 / 12.90 / 13.94 / 3.57 points on ring_01 / ring_1 / ring_100 /
+    airbag-ii): the ring trio's IE END moves lie inside their bands (ring_01
+    21.52 against 45.40, ring_1 4.24 against 8.95, ring_100 4.13 against 8.72
+    points); the trio's KE END moves (about 0.24 points) and one RMS metric
+    each, and all four airbag-ii metrics (IE END 4.4082 against 3.5742, KE END
+    1.0313 against 1.031, IE RMS 0.66 against 0.21, KE RMS 0.32 against 0.07
+    points - every one under 4.5 points) are not covered by a one-twin band:
+    6 metric moves inside, 10 outside over the four carriers.
     Outside the roster all 28 of the 28
     shell-carrying CardStack run decks move: `run_03` .. `run_21` state SHRF
     1.0 on ELFORM 16 NIP 5 T 0.35 mm, `run_22` .. `run_26` leave it blank on
