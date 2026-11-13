@@ -11,6 +11,11 @@ Tested against OpenRadioss 2022 / 2024+ on Windows + Intel MPI. The
 implicit dynamic engine successfully runs on a 568 k DOF model with two
 rigid bodies and a contact interface (`implicit_hr-anlenkung` test case).
 
+**Solver upstream (2026-11):** the OpenRadioss GitHub repository is no longer
+public. The code base continues as [OpenCourant](https://opencourant.org/),
+and solver problems found with k2rad are reported there - see
+[Solver upstream: OpenCourant](#solver-upstream-opencourant).
+
 ---
 
 ## Contents
@@ -23,6 +28,7 @@ rigid bodies and a contact interface (`implicit_hr-anlenkung` test case).
 - [Project structure](#project-structure)
 - [Testing](#testing)
 - [Known limitations](#known-limitations)
+- [Solver upstream: OpenCourant](#solver-upstream-opencourant)
 - [License](#license)
 
 Deeper references: [`docs/IMPLICIT.md`](docs/IMPLICIT.md) ·
@@ -8832,6 +8838,41 @@ mypy k2rad
   completes with the wrong velocity. The converter warns on every
   `*CONTROL_IMPLICIT_DYNAMICS` + `*INITIAL_VELOCITY*` deck; run it explicit.
   See *Implicit dynamic notes*.
+
+---
+
+## Solver upstream: OpenCourant
+
+*Status of 2026-11-13.*
+
+- **The OpenRadioss GitHub repository is no longer public.**
+  `github.com/OpenRadioss/OpenRadioss` answers 404 (a private and a removed
+  repository look the same from outside). The OpenCourant site states that
+  Siemens discontinued the OpenRadioss project on October 1, 2026.
+- **The code base continues as OpenCourant** - <https://opencourant.org/>,
+  "the community continuation of OpenRadioss": the same solver under the GNU
+  AGPL v3, by its own account with the full commit history and with builds for
+  Linux x86-64, Linux arm64 and Windows. It is an independent community
+  project (an incubator project of the Rocky Enterprise Software Foundation),
+  not affiliated with Siemens or Altair.
+- **Solver problems found with k2rad are reported there**, not to the old
+  repository: issues and pull requests at
+  <https://github.com/OpenCourant/OpenCourant>, questions in its
+  [GitHub Discussions](https://github.com/orgs/OpenCourant/discussions).
+  Every "upstream" in this repository means that project from now on. The
+  engine and starter defects recorded here as upstream candidates are not yet
+  recorded as filed there: the two `/IMPL/PRINT/STIF` patches of
+  [`docs/MODAL.md`](docs/MODAL.md), the implicit initial-velocity defect with
+  its free-bar reproducer ([`docs/IMPLICIT.md`](docs/IMPLICIT.md) and *Known
+  limitations* above), and the solver limitations named in
+  [`ROADMAP.md`](ROADMAP.md).
+- **Nothing changes in the conversion.** "OpenRadioss" in this repository's
+  texts, flags and file names keeps naming the solver family and its input
+  format. The source citations (`file.F:line`) and every measured result refer
+  to the OpenRadioss release `latest-20260520` (the source tree the Docker
+  image is built from, [`docker/COLLEAGUE_INSTRUCTIONS.md`](docker/COLLEAGUE_INSTRUCTIONS.md)).
+  No OpenCourant build has been run against this repository's tests or the
+  R14 campaign yet, so a cited line number may differ there.
 
 ---
 

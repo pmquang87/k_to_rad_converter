@@ -11,6 +11,17 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **Docs: the solver's upstream is OpenCourant (2026-11-13).** The OpenRadioss
+  GitHub repository is no longer public (`github.com/OpenRadioss/OpenRadioss`
+  answers 404). The code base continues as OpenCourant
+  (<https://opencourant.org/>; code, issues and pull requests at
+  `github.com/OpenCourant/OpenCourant`). README gains the section *Solver
+  upstream: OpenCourant*, a Contents entry and a pointer under the title:
+  solver problems found with k2rad are reported to that project, and every
+  "upstream" in this repository means it from now on. The section also says
+  which solver release the source citations and the measured results refer to
+  (`latest-20260520`). Text only; no converter output moves.
+
 - **The K-08 one-way note is printed only where the interface is written as
   `/INTER/TYPE7` (2026-11-07).** `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE`
   states its `twoway_auto` note ("the /INTER/TYPE7 k2rad writes for it by
